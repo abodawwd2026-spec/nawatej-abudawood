@@ -1,0 +1,6 @@
+name = "nawatej-abudawood"
+compatibility_date = "2026-09-14"
+pages_build_output_dir = "."
+
+# بعد إنشاء D1 وربطها من لوحة Cloudflare، لا تحتاج تعديل هذا الملف.
+# (هذا الملف مرجعي فقط - الربط الفعلي يتم من إعدادات المشروع في اللوحة)
