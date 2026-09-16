@@ -9,4 +9,4 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "nawatej2"
-database_id = "PUT_DATABASE_ID_HERE"
+database_id = "abc123-xyz"
