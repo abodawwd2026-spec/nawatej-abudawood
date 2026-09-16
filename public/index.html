@@ -1,26 +1,49 @@
-ن✓
-الإدارة العامة للتعليم بالمنطقة الشرقية
-منصة نواتج التعلم (نافس)
-
-مدرسة أبوداوود الابتدائية
-الفصل الدراسي الأول1448هـ
-منصة مدرسية ذكية
-نقيس التعلّم
-ونبني التحسّن
-
-متابعة أسئلة الطلاب، نواتج التعلم، مستوى الإتقان، والتدخلات العلاجية في مكان واحد.
-
-✓ متابعة يومية✓ تحليل المهارات✓ تقارير واضحة
-↗
-تسجيل الدخول
-
-اختر نوع المستخدم للمتابعة
-
-طالبمعلممشرف
-رقم الهوية / اسم المستخدم كلمة المرور (للطالب لا يحتاج كلمة مرور)   دخول إلى المنصة ←
-الصفوف المستهدفة: الثالث والسادس الابتدائي
-ن✓
-نواتج التعلمأبوداوود الابتدائية
-↩ تسجيل الخروج
-منصة نواتج التعلم (نافس)
-منصة نواتج التعلم (نافس) • مدرسة أبوداوود الابتدائية • الفصل الأول
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0b5d67">
+<title>منصة نواتج التعلم (نافس) | مدرسة أبوداوود الابتدائية</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-logo"><span>ن</span><i>✓</i></div>
+    <div><div class="eyebrow">الإدارة العامة للتعليم بالمنطقة الشرقية</div><h1>منصة نواتج التعلم (نافس)</h1><div class="school">مدرسة أبوداوود الابتدائية</div></div>
+  </div>
+  <div class="semester"><span>الفصل الدراسي الأول</span><strong>1448هـ</strong></div>
+</header>
+<main>
+<section id="loginView" class="login-shell">
+  <div class="welcome-panel">
+    <div class="mini-label">منصة مدرسية ذكية</div><h2>نقيس التعلّم<br><span>ونبني التحسّن</span></h2>
+    <p>متابعة أسئلة الطلاب، نواتج التعلم، مستوى الإتقان، والتدخلات العلاجية في مكان واحد.</p>
+    <div class="feature-row"><span>✓ متابعة يومية</span><span>✓ تحليل المهارات</span><span>✓ تقارير واضحة</span></div>
+  </div>
+  <div class="login-card">
+    <div class="login-title"><div class="round-icon">↗</div><div><h2>تسجيل الدخول</h2><p>اختر نوع المستخدم للمتابعة</p></div></div>
+    <div class="tabs"><button class="tab active" data-role="student">طالب</button><button class="tab" data-role="teacher">معلم</button><button class="tab" data-role="supervisor">مشرف</button></div>
+    <label>رقم الهوية / اسم المستخدم</label><input id="loginUser" placeholder="أدخل رقم الهوية أو اسم المستخدم" autocomplete="username">
+    <label>كلمة المرور <span id="passwordHint" class="muted">(للطالب لا يحتاج كلمة مرور)</span></label>
+    <input id="loginPass" type="password" placeholder="كلمة المرور" autocomplete="current-password" disabled>
+    <button id="loginBtn" class="primary wide">دخول إلى المنصة <span>←</span></button><div id="loginMsg" class="msg"></div>
+    <div class="login-note">الصفوف المستهدفة: <b>الثالث والسادس الابتدائي</b></div>
+  </div>
+</section>
+<section id="appView" class="hidden"><div class="layout">
+  <aside class="sidebar">
+    <div class="side-brand"><div class="brand-logo small"><span>ن</span><i>✓</i></div><div><b>نواتج التعلم</b><small>أبوداوود الابتدائية</small></div></div>
+    <div id="userBox" class="userbox"></div><nav id="nav"></nav>
+    <button id="logoutBtn" class="logout">↩ تسجيل الخروج</button>
+  </aside>
+  <section class="content"><div class="mobile-title">منصة نواتج التعلم (نافس)</div><div id="page"></div></section>
+</div></section>
+</main>
+<footer>منصة نواتج التعلم (نافس) <span>•</span> مدرسة أبوداوود الابتدائية <span>•</span> الفصل الأول 1448هـ</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="/app.js"></script>
+</body></html>
