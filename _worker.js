@@ -360,14 +360,10 @@ async function studentsOverview(session, env) {
     }
   }
   let aggMap = {};
-  if (students.length) {
-    const ids = students.map(s => s.id);
-    const ph = ids.map(() => '?').join(',');
-    const { results: aggRows } = await env.DB.prepare(
-      `SELECT student_id, COUNT(*) as total, SUM(correct) as correct, SUM(CASE WHEN source='teacher_student_session' THEN 1 ELSE 0 END) as proxy_count FROM attempts WHERE student_id IN (${ph}) GROUP BY student_id`
-    ).bind(...ids).all();
-    aggRows.forEach(r => { aggMap[r.student_id] = { total: r.total, correct: r.correct || 0, proxyCount: r.proxy_count || 0 }; });
-  }
+  const { results: aggRows } = await env.DB.prepare(
+    `SELECT student_id, COUNT(*) as total, SUM(correct) as correct, SUM(CASE WHEN source='teacher_student_session' THEN 1 ELSE 0 END) as proxy_count FROM attempts GROUP BY student_id`
+  ).all();
+  aggRows.forEach(r => { aggMap[r.student_id] = { total: r.total, correct: r.correct || 0, proxyCount: r.proxy_count || 0 }; });
   const qCountRow = session.role === 'teacher'
     ? await env.DB.prepare('SELECT COUNT(*) as c FROM questions WHERE active=1 AND grade=? AND subject=?').bind(session.grade, session.subject).first()
     : await env.DB.prepare('SELECT COUNT(*) as c FROM questions WHERE active=1').first();
