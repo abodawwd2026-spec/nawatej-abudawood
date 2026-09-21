@@ -176,7 +176,7 @@ async function students() {
   const data = await api('students');
   const list = data.students;
   lastStudentsCache = list;
-  return `<div class="page-head"><div><h2>${role === 'teacher' ? 'طلاب فصولي' : 'إدارة الطلاب'}</h2><p class="muted">${role === 'teacher' ? 'تظهر هنا فصولك المسندة فقط. يمكنك فتح اسم الطالب ليحل بنفسه من جهازك عند تعذر دخوله من المنزل، أو متابعة أسابيعه الفائتة.' : 'يمكن للمعلم فتح اسم الطالب ليحل الطالب بنفسه من جهاز المعلم عند تعذر دخوله من المنزل.'}</p></div>${role === 'supervisor' ? `<div class="actions" style="margin:0"><button class="primary" onclick="addStudent()">+ إضافة طالب</button><button onclick="importPhonesFlow()">📱 استيراد أرقام الجوال من إكسل</button></div>` : ''}</div>
+  return `<div class="page-head"><div><h2>${role === 'teacher' ? 'طلاب فصولي' : 'إدارة الطلاب'}</h2><p class="muted">${role === 'teacher' ? 'تظهر هنا فصولك المسندة فقط. يمكنك فتح اسم الطالب ليحل بنفسه من جهازك عند تعذر دخوله من المنزل، أو متابعة أسابيعه الفائتة.' : 'يمكن للمعلم فتح اسم الطالب ليحل الطالب بنفسه من جهاز المعلم عند تعذر دخوله من المنزل.'}</p></div>${role === 'supervisor' ? `<div class="actions" style="margin:0"><button class="primary" onclick="addStudent()">+ إضافة طالب</button><button onclick="importPhonesFlow()">📱 استيراد أرقام الجوال من إكسل</button><button onclick="syncStudentsFlow()">🔄 مزامنة كاملة لقائمة الطلاب من إكسل</button></div>` : ''}</div>
   <div class="panel"><table><thead><tr><th>الاسم</th><th>الهوية</th><th>الصف</th><th>الفصل</th><th>جوال ولي الأمر</th><th>إجراء</th></tr></thead><tbody>${list.map(s => `<tr><td>${esc(s.name)}</td><td>${esc(s.id)}</td><td>${s.grade}</td><td>${esc(s.class)}</td><td>${s.phone ? esc(s.phone) : '<span class="muted">—</span>'}</td><td>${role === 'teacher' ? `<div class="actions" style="margin:0"><button class="primary small-btn" onclick="startProxy('${esc(s.id)}')">فتح باسم الطالب</button><button class="small-btn" onclick="weeksViewStudentId='${esc(s.id)}';page='weeks';render()">متابعة الأسابيع</button></div>` : role === 'supervisor' ? `<button onclick="editStudent('${esc(s.id)}')">تعديل/نقل</button> <button class="danger" onclick="delStudent('${esc(s.id)}')">حذف</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="6">لا يوجد طلاب بعد.</td></tr>'}</tbody></table></div>`;
 }
 async function addStudent() {
@@ -228,6 +228,42 @@ function importPhonesFlow() {
       if (!parsed.length) return alert('لم يتم العثور على بيانات صالحة. تأكد أن العمود الأول رقم الهوية والثاني رقم الجوال.');
       const res = await api('students/import-phones', { method: 'POST', body: { rows: parsed } });
       alert(`تم تحديث ${res.updated} رقمًا بنجاح.${res.notFoundCount ? `\nلم يُعثر على ${res.notFoundCount} رقم هوية في قائمة الطلاب.` : ''}`);
+      render();
+    } catch (e) { alert('تعذرت قراءة الملف: ' + e.message); }
+  };
+  input.click();
+}
+// ---------- مزامنة كاملة لقائمة الطلاب من إكسل: إضافة الجديد، تحديث الموجود، وحذف غير الموجود في الملف ----------
+function syncStudentsFlow() {
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = '.xlsx,.xls,.csv';
+  input.onchange = async () => {
+    const file = input.files[0]; if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+      if (!rows.length) return alert('الملف فارغ.');
+      let startRow = 0;
+      const header = (rows[0] || []).map(x => String(x || ''));
+      const looksLikeHeader = header.some(h => /هوي|id|اسم|name|صف|فصل/i.test(h));
+      if (looksLikeHeader) startRow = 1;
+      const parsed = [];
+      for (let i = startRow; i < rows.length; i++) {
+        const row = rows[i]; if (!row || !row.length) continue;
+        const id = String(row[0] ?? '').trim();
+        const name = String(row[1] ?? '').trim();
+        const grade = String(row[2] ?? '').trim();
+        const cls = String(row[3] ?? '').trim();
+        const phone = row[4] !== undefined ? String(row[4] ?? '').trim() : '';
+        if (id && name && grade && cls) parsed.push({ id, name, grade, class: cls, phone });
+      }
+      if (!parsed.length) return alert('لم يتم العثور على بيانات صالحة. ترتيب الأعمدة المطلوب: رقم الهوية، الاسم، الصف، الفصل، (وجوال ولي الأمر اختياريًا).');
+      const ok = confirm(`سيتم رفع ${parsed.length} طالبًا من الملف.\n\n⚠️ تنبيه مهم: أي طالب مسجَّل حاليًا في المنصة وغير موجود في هذا الملف سيُحذف (حذف يحفظ نتائجه التاريخية، لكن يخرجه من القوائم النشطة).\n\nهل تريد المتابعة؟`);
+      if (!ok) return;
+      const res = await api('students/sync-excel', { method: 'POST', body: { rows: parsed } });
+      alert(`تمت المزامنة بنجاح:\nطلاب جدد أُضيفوا: ${res.added}\nطلاب حُدِّثت بياناتهم: ${res.updated}\nطلاب حُذفوا (غير موجودين بالملف): ${res.removed}${res.skipped ? `\nصفوف تم تجاهلها لنقص أو خطأ في البيانات: ${res.skipped}` : ''}`);
       render();
     } catch (e) { alert('تعذرت قراءة الملف: ' + e.message); }
   };

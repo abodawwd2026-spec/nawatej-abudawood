@@ -220,6 +220,43 @@ async function importPhones(session, env, request) {
   return json({ ok: true, updated, notFoundCount: notFound.length, notFound: notFound.slice(0, 20) });
 }
 
+// ---------- مزامنة كاملة لقائمة الطلاب من إكسل (المشرف فقط): إضافة الجديد، تحديث الموجود، وحذف غير الموجود بالملف ----------
+async function syncStudentsExcel(session, env, request) {
+  if (session.role !== 'supervisor') return forbidden();
+  let body; try { body = await request.json(); } catch { return badRequest(); }
+  const rows = Array.isArray(body && body.rows) ? body.rows : [];
+  if (!rows.length) return badRequest('لا توجد بيانات للمزامنة');
+  const seenIds = new Set();
+  let added = 0, updated = 0, skipped = 0;
+  for (const row of rows) {
+    const id = String(row.id || '').trim();
+    const name = String(row.name || '').trim();
+    const grade = Number(row.grade);
+    const className = String(row.class || '').trim();
+    if (!id || !name || !grade || !className || !(grade === 3 || grade === 6)) { skipped++; continue; }
+    seenIds.add(id);
+    const phone = row.phone ? normalizePhone(row.phone) : null;
+    const existing = await env.DB.prepare('SELECT id FROM students WHERE id=?').bind(id).first();
+    if (existing) {
+      await env.DB.prepare('UPDATE students SET name=?, grade=?, class_name=?, active=1, parent_phone=COALESCE(?,parent_phone) WHERE id=?')
+        .bind(name, grade, className, phone, id).run();
+      updated++;
+    } else {
+      await env.DB.prepare('INSERT INTO students(id,name,grade,class_name,parent_phone) VALUES (?,?,?,?,?)').bind(id, name, grade, className, phone).run();
+      added++;
+    }
+  }
+  const { results: activeStudents } = await env.DB.prepare('SELECT id FROM students WHERE active=1').all();
+  let removed = 0;
+  for (const s of activeStudents) {
+    if (!seenIds.has(s.id)) {
+      await env.DB.prepare('UPDATE students SET active=0 WHERE id=?').bind(s.id).run();
+      removed++;
+    }
+  }
+  return json({ ok: true, added, updated, removed, skipped });
+}
+
 // ---------- المعلمون ----------
 async function listTeachers(session, env) {
   if (session.role !== 'supervisor') return forbidden();
@@ -669,6 +706,7 @@ async function handleApi(request, env, path) {
     if (method === 'GET' && path === 'students') return await listStudents(session, env);
     if (method === 'POST' && path === 'students') return await createStudent(session, env, request);
     if (method === 'POST' && path === 'students/import-phones') return await importPhones(session, env, request);
+    if (method === 'POST' && path === 'students/sync-excel') return await syncStudentsExcel(session, env, request);
     if (method === 'PUT' && seg[0] === 'students' && seg[1]) return await updateStudent(session, env, request, decodeURIComponent(seg[1]));
     if (method === 'DELETE' && seg[0] === 'students' && seg[1]) return await deleteStudent(session, env, decodeURIComponent(seg[1]));
 
