@@ -78,6 +78,8 @@ async function readSettings(env) {
     semesterStart: map.semester_start || '2026-08-30',
     supervisorUsername: map.supervisor_username || 'admin',
     supervisorPasswordHash: map.supervisor_password_hash || null,
+    manualOpenWeek: map.manual_open_week ? Number(map.manual_open_week) : null,
+    subjectsSeparate: map.subjects_separate === '1',
   };
 }
 async function upsertSetting(env, key, value) {
@@ -249,14 +251,30 @@ async function getCurriculum(env) {
 }
 async function listQuestionsBank(session, env) {
   if (session.role === 'teacher') {
-    const { results } = await env.DB.prepare('SELECT grade,subject,week,lesson,question FROM questions WHERE active=1 AND grade=? AND subject=? ORDER BY week,id').bind(session.grade, session.subject).all();
+    const { results } = await env.DB.prepare('SELECT id,grade,subject,week,lesson,question FROM questions WHERE active=1 AND grade=? AND subject=? ORDER BY week,id').bind(session.grade, session.subject).all();
     return json({ ok: true, questions: results });
   }
   if (session.role === 'supervisor') {
-    const { results } = await env.DB.prepare('SELECT grade,subject,week,lesson,question FROM questions WHERE active=1 ORDER BY grade,subject,week,id').all();
+    const { results } = await env.DB.prepare('SELECT id,grade,subject,week,lesson,question FROM questions WHERE active=1 ORDER BY grade,subject,week,id').all();
     return json({ ok: true, questions: results });
   }
   return forbidden();
+}
+
+// ---------- إضافة سؤال جديد لبنك الأسئلة (المعلم فقط، لمادته وصفّه المسندين) ----------
+async function createQuestion(session, env, request) {
+  if (session.role !== 'teacher') return forbidden();
+  let body; try { body = await request.json(); } catch { return badRequest(); }
+  const { week, lesson, question, choices, answerIndex } = body || {};
+  const w = Number(week);
+  if (!Number.isInteger(w) || w < 1 || w > 17) return badRequest('رقم الأسبوع يجب أن يكون بين 1 و17');
+  if (!question || !String(question).trim()) return badRequest('نص السؤال مطلوب');
+  if (!Array.isArray(choices) || choices.length < 2 || choices.some(c => !c || !String(c).trim())) return badRequest('يجب إدخال خيارين على الأقل، كلها غير فارغة');
+  const ai = Number(answerIndex);
+  if (!Number.isInteger(ai) || ai < 0 || ai >= choices.length) return badRequest('حدد الإجابة الصحيحة من بين الخيارات المدخلة');
+  await env.DB.prepare('INSERT INTO questions(grade,subject,week,lesson,question,choices_json,answer_index) VALUES (?,?,?,?,?,?,?)')
+    .bind(session.grade, session.subject, w, lesson || null, String(question).trim(), JSON.stringify(choices.map(c => String(c).trim())), ai).run();
+  return json({ ok: true });
 }
 
 // ---------- تحديد الطالب المستهدف (نفسه إن كان طالبًا، أو ضمن نطاق المعلم عبر وضع "فتح باسم الطالب") ----------
@@ -300,42 +318,73 @@ async function getWeekTest(session, env, url) {
   const settings = await readSettings(env);
   const currentWk = weekNumber(settings.semesterStart);
   const { code } = riyadhToday();
-  const isExamDay = settings.examDays.includes(code);
+  const manualOpen = settings.manualOpenWeek === currentWk;
+  const isExamDay = settings.examDays.includes(code) || manualOpen;
   const examDayNames = settings.examDays.map(c => DAY_NAMES[c]).join(' و');
 
   const requestedWeek = url.searchParams.get('week');
   const wk = await resolveTargetWeek(session, env, student, requestedWeek, currentWk);
   if (wk.error) return badRequest(wk.error);
   const week = wk.week;
+  const allSubjects = subjectsForGrade(student.grade);
+  const stObj = { id: student.id, name: student.name, grade: student.grade, class: student.class_name };
 
+  if (settings.subjectsSeparate) {
+    const requestedSubject = url.searchParams.get('subject');
+    if (!requestedSubject) {
+      const { results: doneRows } = await env.DB.prepare('SELECT subject, correct FROM attempts WHERE student_id=? AND week=?').bind(student.id, week).all();
+      const bySubj = {};
+      doneRows.forEach(r => { bySubj[r.subject] = bySubj[r.subject] || { total: 0, correct: 0 }; bySubj[r.subject].total++; if (r.correct) bySubj[r.subject].correct++; });
+      const subjectsOut = allSubjects.map(s => {
+        const d = bySubj[s];
+        if (d) { const pct = Math.round((d.correct / d.total) * 100); return { subject: s, completed: true, total: d.total, correct: d.correct, pct, message: motivationLine(pct) }; }
+        return { subject: s, completed: false };
+      });
+      const allDone = subjectsOut.every(s => s.completed);
+      return json({ ok: true, mode: 'separate', week, isExamDay, completed: allDone, examDayNames, isCatchup: wk.isCatchup, manualOpen, student: stObj, subjects: subjectsOut });
+    }
+    if (!allSubjects.includes(requestedSubject)) return badRequest('مادة غير صالحة لصف هذا الطالب');
+    const existing = await env.DB.prepare('SELECT correct FROM attempts WHERE student_id=? AND week=? AND subject=?').bind(student.id, week, requestedSubject).all();
+    if (existing.results.length) {
+      const total = existing.results.length, correct = existing.results.filter(r => r.correct).length;
+      const pct = Math.round((correct / total) * 100);
+      return json({ ok: true, mode: 'separate', week, subject: requestedSubject, isExamDay, completed: true, examDayNames, isCatchup: wk.isCatchup, manualOpen, student: stObj,
+        result: { total, correct, wrong: total - correct, pct, message: motivationLine(pct) } });
+    }
+    if (session.role === 'student' && !wk.isCatchup && !isExamDay) {
+      return json({ ok: true, mode: 'separate', week, subject: requestedSubject, isExamDay: false, completed: false, questions: [], examDayNames, isCatchup: false, manualOpen: false, student: stObj });
+    }
+    const { results } = await env.DB.prepare('SELECT id,grade,subject,week,lesson,question,choices_json FROM questions WHERE active=1 AND grade=? AND subject=? AND week=? ORDER BY id')
+      .bind(student.grade, requestedSubject, week).all();
+    const qOut = results.map(q => ({ id: q.id, subject: q.subject, week: q.week, lesson: q.lesson, question: q.question, choices: JSON.parse(q.choices_json) }));
+    return json({ ok: true, mode: 'separate', week, subject: requestedSubject, isExamDay: true, completed: false, examDayNames, isCatchup: wk.isCatchup, manualOpen, student: stObj, questions: qOut });
+  }
+
+  // ---- الوضع المجتمع (الافتراضي): كل مواد الطالب في اختبار واحد ----
   const existing = await env.DB.prepare('SELECT correct FROM attempts WHERE student_id=? AND week=?').bind(student.id, week).all();
   if (existing.results.length) {
     const total = existing.results.length, correct = existing.results.filter(r => r.correct).length;
     const pct = Math.round((correct / total) * 100);
-    return json({ ok: true, week, isExamDay, completed: true, examDayNames, isCatchup: wk.isCatchup,
-      student: { id: student.id, name: student.name, grade: student.grade, class: student.class_name },
+    return json({ ok: true, mode: 'combined', week, isExamDay, completed: true, examDayNames, isCatchup: wk.isCatchup, manualOpen, student: stObj,
       result: { total, correct, wrong: total - correct, pct, message: motivationLine(pct) } });
   }
   if (session.role === 'student' && !wk.isCatchup && !isExamDay) {
-    return json({ ok: true, week, isExamDay: false, completed: false, questions: [], examDayNames, isCatchup: false });
+    return json({ ok: true, mode: 'combined', week, isExamDay: false, completed: false, questions: [], examDayNames, isCatchup: false, manualOpen: false, student: stObj });
   }
-  const subjects = subjectsForGrade(student.grade);
   let questions = [];
-  for (const sub of subjects) {
+  for (const sub of allSubjects) {
     const { results } = await env.DB.prepare('SELECT id,grade,subject,week,lesson,question,choices_json FROM questions WHERE active=1 AND grade=? AND subject=? AND week=? ORDER BY id')
       .bind(student.grade, sub, week).all();
     questions.push(...results);
   }
   const qOut = questions.map(q => ({ id: q.id, subject: q.subject, week: q.week, lesson: q.lesson, question: q.question, choices: JSON.parse(q.choices_json) }));
-  return json({ ok: true, week, isExamDay: true, completed: false, examDayNames, isCatchup: wk.isCatchup,
-    student: { id: student.id, name: student.name, grade: student.grade, class: student.class_name },
-    questions: qOut });
+  return json({ ok: true, mode: 'combined', week, isExamDay: true, completed: false, examDayNames, isCatchup: wk.isCatchup, manualOpen, student: stObj, questions: qOut });
 }
 
 async function submitWeekTest(session, env, request) {
   if (session.role !== 'student' && session.role !== 'teacher') return forbidden();
   let body; try { body = await request.json(); } catch { return badRequest(); }
-  const { studentId, answers, reason, week: requestedWeek } = body || {};
+  const { studentId, answers, reason, week: requestedWeek, subject: requestedSubject } = body || {};
   const student = await resolveTargetStudent(session, env, studentId);
   if (!student) return badRequest('طالب غير موجود أو خارج نطاقك');
   const settings = await readSettings(env);
@@ -345,14 +394,24 @@ async function submitWeekTest(session, env, request) {
   const wk = await resolveTargetWeek(session, env, student, requestedWeek, currentWk);
   if (wk.error) return badRequest(wk.error);
   const week = wk.week;
-  if (session.role === 'student' && !wk.isCatchup && !settings.examDays.includes(code)) return badRequest('لا يوجد اختبار اليوم');
+  const manualOpen = settings.manualOpenWeek === currentWk;
+  if (session.role === 'student' && !wk.isCatchup && !settings.examDays.includes(code) && !manualOpen) return badRequest('لا يوجد اختبار اليوم');
 
-  const already = await env.DB.prepare('SELECT id FROM attempts WHERE student_id=? AND week=? LIMIT 1').bind(student.id, week).first();
-  if (already) return badRequest('تم إنجاز اختبار هذا الأسبوع مسبقًا');
+  const allSubjects = subjectsForGrade(student.grade);
+  let subjectsToGrade;
+  if (settings.subjectsSeparate) {
+    if (!requestedSubject || !allSubjects.includes(requestedSubject)) return badRequest('يجب تحديد المادة');
+    const already = await env.DB.prepare('SELECT id FROM attempts WHERE student_id=? AND week=? AND subject=? LIMIT 1').bind(student.id, week, requestedSubject).first();
+    if (already) return badRequest('تم إنجاز اختبار هذه المادة لهذا الأسبوع مسبقًا');
+    subjectsToGrade = [requestedSubject];
+  } else {
+    const already = await env.DB.prepare('SELECT id FROM attempts WHERE student_id=? AND week=? LIMIT 1').bind(student.id, week).first();
+    if (already) return badRequest('تم إنجاز اختبار هذا الأسبوع مسبقًا');
+    subjectsToGrade = allSubjects;
+  }
 
-  const subjects = subjectsForGrade(student.grade);
   let questions = [];
-  for (const sub of subjects) {
+  for (const sub of subjectsToGrade) {
     const { results } = await env.DB.prepare('SELECT * FROM questions WHERE active=1 AND grade=? AND subject=? AND week=? ORDER BY id')
       .bind(student.grade, sub, week).all();
     questions.push(...results);
@@ -372,10 +431,20 @@ async function submitWeekTest(session, env, request) {
     await env.DB.prepare('INSERT INTO attempts(student_id,question_id,week,subject,answer_index,correct,source,teacher_username,reason,entered_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
       .bind(student.id, q.id, week, q.subject, Number(sel), isCorrect, source, session.role === 'teacher' ? session.ref_id : null, reason || null, now).run();
   }
-  if (!total) return badRequest('لا توجد أسئلة لهذا الأسبوع');
-  if (wk.isCatchup) { await env.DB.prepare('DELETE FROM catchup_grants WHERE student_id=? AND week=?').bind(student.id, week).run(); }
+  if (!total) return badRequest('لا توجد أسئلة لهذا الأسبوع' + (settings.subjectsSeparate ? ' لهذه المادة' : ''));
+  if (wk.isCatchup) {
+    if (!settings.subjectsSeparate) {
+      await env.DB.prepare('DELETE FROM catchup_grants WHERE student_id=? AND week=?').bind(student.id, week).run();
+    } else {
+      const doneSubjRows = await env.DB.prepare('SELECT DISTINCT subject FROM attempts WHERE student_id=? AND week=?').bind(student.id, week).all();
+      const doneSubjSet = new Set(doneSubjRows.results.map(r => r.subject));
+      if (allSubjects.every(s => doneSubjSet.has(s))) {
+        await env.DB.prepare('DELETE FROM catchup_grants WHERE student_id=? AND week=?').bind(student.id, week).run();
+      }
+    }
+  }
   const pct = Math.round((correctCount / total) * 100);
-  return json({ ok: true, week, total, correct: correctCount, wrong: total - correctCount, pct, message: motivationLine(pct), studentName: student.name });
+  return json({ ok: true, week, subject: settings.subjectsSeparate ? subjectsToGrade[0] : undefined, total, correct: correctCount, wrong: total - correctCount, pct, message: motivationLine(pct), studentName: student.name });
 }
 
 // ---------- الأسابيع الفائتة (للطالب: ما سُمح له باستكماله) ----------
@@ -462,11 +531,14 @@ async function myResults(session, env) {
 }
 
 // ---------- بنك أسئلتي (مراجعة الطالب لكل ما حلّه، مع كشف الإجابة الصحيحة للمحلول فقط) ----------
+// لا تظهر أسئلة الأسابيع المستقبلية إطلاقًا حتى يأتي دورها
 async function myQuestionBank(session, env) {
   if (session.role !== 'student') return forbidden();
   const s = await env.DB.prepare('SELECT * FROM students WHERE id=? AND active=1').bind(session.ref_id).first();
   if (!s) return unauthorized();
-  const { results: qRows } = await env.DB.prepare('SELECT id,subject,week,lesson,question,choices_json,answer_index FROM questions WHERE active=1 AND grade=? ORDER BY subject,week,id').bind(s.grade).all();
+  const settings = await readSettings(env);
+  const currentWk = weekNumber(settings.semesterStart);
+  const { results: qRows } = await env.DB.prepare('SELECT id,subject,week,lesson,question,choices_json,answer_index FROM questions WHERE active=1 AND grade=? AND week<=? ORDER BY subject,week,id').bind(s.grade, currentWk).all();
   const { results: aRows } = await env.DB.prepare('SELECT question_id,answer_index,correct FROM attempts WHERE student_id=?').bind(session.ref_id).all();
   const aMap = {}; aRows.forEach(a => { aMap[a.question_id] = a; });
   const out = qRows.map(q => {
@@ -542,18 +614,26 @@ async function studentsOverview(session, env) {
 // ---------- الإعدادات ----------
 async function getSettingsRoute(env) {
   const s = await readSettings(env);
-  return json({ ok: true, settings: { examDays: s.examDays, semesterStart: s.semesterStart, supervisorUsername: s.supervisorUsername, currentWeek: weekNumber(s.semesterStart) } });
+  return json({ ok: true, settings: { examDays: s.examDays, semesterStart: s.semesterStart, supervisorUsername: s.supervisorUsername, currentWeek: weekNumber(s.semesterStart), manualOpenWeek: s.manualOpenWeek, subjectsSeparate: s.subjectsSeparate } });
 }
 async function putSettingsRoute(session, env, request) {
   if (session.role !== 'supervisor') return forbidden();
   let body; try { body = await request.json(); } catch { return badRequest(); }
-  const { examDays, semesterStart } = body || {};
+  const { examDays, semesterStart, manualOpenWeek, subjectsSeparate } = body || {};
   if (Array.isArray(examDays) && examDays.length === 2 && examDays.every(c => DAY_CODES.includes(c))) {
     await upsertSetting(env, 'exam_day1', examDays[0]);
     await upsertSetting(env, 'exam_day2', examDays[1]);
   }
   if (semesterStart && /^\d{4}-\d{2}-\d{2}$/.test(semesterStart)) {
     await upsertSetting(env, 'semester_start', semesterStart);
+  }
+  if (manualOpenWeek !== undefined) {
+    if (manualOpenWeek === null || manualOpenWeek === '') await upsertSetting(env, 'manual_open_week', '');
+    else if (Number.isInteger(Number(manualOpenWeek)) && Number(manualOpenWeek) >= 1 && Number(manualOpenWeek) <= 17) await upsertSetting(env, 'manual_open_week', String(Number(manualOpenWeek)));
+    else return badRequest('رقم أسبوع غير صالح');
+  }
+  if (subjectsSeparate !== undefined) {
+    await upsertSetting(env, 'subjects_separate', subjectsSeparate ? '1' : '0');
   }
   return json({ ok: true });
 }
@@ -598,6 +678,7 @@ async function handleApi(request, env, path) {
 
     if (method === 'GET' && path === 'curriculum') return await getCurriculum(env);
     if (method === 'GET' && path === 'questions-bank') return await listQuestionsBank(session, env);
+    if (method === 'POST' && path === 'questions') return await createQuestion(session, env, request);
 
     if (method === 'GET' && path === 'week-test') return await getWeekTest(session, env, url);
     if (method === 'POST' && path === 'week-test/submit') return await submitWeekTest(session, env, request);
