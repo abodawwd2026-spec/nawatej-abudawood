@@ -9,7 +9,9 @@ let role = null, user = null, page = 'home';
 let proxyStudentId = null;
 let proxyTargetWeek = null;      // أسبوع فائت يفتحه المعلم مباشرة نيابةً عن الطالب (دون حاجة لإذن)
 let catchupTargetWeek = null;    // أسبوع فائت يحله الطالب نفسه بعد إذن المعلم
+let selectedSubject = null;      // المادة المختارة حاليًا (عند تفعيل وضع "كل مادة لوحدها")
 let weeksViewStudentId = null;   // الطالب المعروض حاليًا في صفحة "متابعة الأسابيع" (المعلم)
+let showAddQuestionForm = false; // إظهار/إخفاء نموذج إضافة سؤال جديد (المعلم)
 let lastStudentsCache = []; // للاستخدام في نوافذ التعديل السريعة (prompt) فقط، لا يُعتمد عليه كمصدر بيانات
 
 // ---------- طبقة الاتصال بالـ API ----------
@@ -91,7 +93,7 @@ async function shell() {
     ? [['home', 'الرئيسية'], ['students', 'طلاب الفصول'], ['proxy', 'فتح اختبار الطالب'], ['questions', 'الاختبارات'], ['reports', 'تقارير الطلاب']]
     : [['home', 'الرئيسية'], ['tests', 'اختباراتي'], ['bank', 'بنك أسئلتي'], ['results', 'نتائجي']];
   $('#nav').innerHTML = items.map(x => `<button data-p="${x[0]}">${x[1]}</button>`).join('');
-  $('#nav').querySelectorAll('button').forEach(b => b.onclick = () => { page = b.dataset.p; render(); });
+  $('#nav').querySelectorAll('button').forEach(b => b.onclick = () => { page = b.dataset.p; selectedSubject = null; catchupTargetWeek = null; render(); });
   await render();
 }
 
@@ -174,7 +176,7 @@ async function students() {
   const data = await api('students');
   const list = data.students;
   lastStudentsCache = list;
-  return `<div class="page-head"><div><h2>${role === 'teacher' ? 'طلاب فصولي' : 'إدارة الطلاب'}</h2><p class="muted">${role === 'teacher' ? 'تظهر هنا فصولك المسندة فقط. يمكنك فتح اسم الطالب ليحل بنفسه من جهازك عند تعذر دخوله من المنزل، أو متابعة أسابيعه الفائتة.' : 'يمكن للمعلم فتح اسم الطالب ليحل الطالب بنفسه من جهاز المعلم عند تعذر دخوله من المنزل.'}</p></div>${role === 'supervisor' ? `<div class="actions" style="margin:0"><button class="primary" onclick="addStudent()">+ إضافة طالب</button><button onclick="importPhonesFlow()">📱 استيراد أرقام الجوال من إكسل</button></div>` : ''}</div>
+  return `<div class="page-head"><div><h2>${role === 'teacher' ? 'طلاب فصولي' : 'إدارة الطلاب'}</h2><p class="muted">${role === 'teacher' ? 'تظهر هنا فصولك المسندة فقط. يمكنك فتح اسم الطالب ليحل بنفسه من جهازك عند تعذر دخوله من المنزل، أو متابعة أسابيعه الفائتة.' : 'يمكن للمعلم فتح اسم الطالب ليحل الطالب بنفسه من جهاز المعلم عند تعذر دخوله من المنزل.'}</p></div>${role === 'supervisor' ? `<div class="actions" style="margin:0"><button class="primary" onclick="addStudent()">+ إضافة طالب</button><button onclick="importPhonesFlow()">📱 استيراد أرقام الجوال من إكسل</button><button onclick="syncStudentsFlow()">🔄 مزامنة كاملة لقائمة الطلاب من إكسل</button></div>` : ''}</div>
   <div class="panel"><table><thead><tr><th>الاسم</th><th>الهوية</th><th>الصف</th><th>الفصل</th><th>جوال ولي الأمر</th><th>إجراء</th></tr></thead><tbody>${list.map(s => `<tr><td>${esc(s.name)}</td><td>${esc(s.id)}</td><td>${s.grade}</td><td>${esc(s.class)}</td><td>${s.phone ? esc(s.phone) : '<span class="muted">—</span>'}</td><td>${role === 'teacher' ? `<div class="actions" style="margin:0"><button class="primary small-btn" onclick="startProxy('${esc(s.id)}')">فتح باسم الطالب</button><button class="small-btn" onclick="weeksViewStudentId='${esc(s.id)}';page='weeks';render()">متابعة الأسابيع</button></div>` : role === 'supervisor' ? `<button onclick="editStudent('${esc(s.id)}')">تعديل/نقل</button> <button class="danger" onclick="delStudent('${esc(s.id)}')">حذف</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="6">لا يوجد طلاب بعد.</td></tr>'}</tbody></table></div>`;
 }
 async function addStudent() {
@@ -231,6 +233,42 @@ function importPhonesFlow() {
   };
   input.click();
 }
+// ---------- مزامنة كاملة لقائمة الطلاب من إكسل: إضافة الجديد، تحديث الموجود، وحذف غير الموجود في الملف ----------
+function syncStudentsFlow() {
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = '.xlsx,.xls,.csv';
+  input.onchange = async () => {
+    const file = input.files[0]; if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+      if (!rows.length) return alert('الملف فارغ.');
+      let startRow = 0;
+      const header = (rows[0] || []).map(x => String(x || ''));
+      const looksLikeHeader = header.some(h => /هوي|id|اسم|name|صف|فصل/i.test(h));
+      if (looksLikeHeader) startRow = 1;
+      const parsed = [];
+      for (let i = startRow; i < rows.length; i++) {
+        const row = rows[i]; if (!row || !row.length) continue;
+        const id = String(row[0] ?? '').trim();
+        const name = String(row[1] ?? '').trim();
+        const grade = String(row[2] ?? '').trim();
+        const cls = String(row[3] ?? '').trim();
+        const phone = row[4] !== undefined ? String(row[4] ?? '').trim() : '';
+        if (id && name && grade && cls) parsed.push({ id, name, grade, class: cls, phone });
+      }
+      if (!parsed.length) return alert('لم يتم العثور على بيانات صالحة. ترتيب الأعمدة المطلوب: رقم الهوية، الاسم، الصف، الفصل، (وجوال ولي الأمر اختياريًا).');
+      const ok = confirm(`سيتم رفع ${parsed.length} طالبًا من الملف.\n\n⚠️ تنبيه مهم: أي طالب مسجَّل حاليًا في المنصة وغير موجود في هذا الملف سيُحذف (حذف يحفظ نتائجه التاريخية، لكن يخرجه من القوائم النشطة).\n\nهل تريد المتابعة؟`);
+      if (!ok) return;
+      const res = await api('students/sync-excel', { method: 'POST', body: { rows: parsed } });
+      alert(`تمت المزامنة بنجاح:\nطلاب جدد أُضيفوا: ${res.added}\nطلاب حُدِّثت بياناتهم: ${res.updated}\nطلاب حُذفوا (غير موجودين بالملف): ${res.removed}${res.skipped ? `\nصفوف تم تجاهلها لنقص أو خطأ في البيانات: ${res.skipped}` : ''}`);
+      render();
+    } catch (e) { alert('تعذرت قراءة الملف: ' + e.message); }
+  };
+  input.click();
+}
 function whatsappLink(phone, studentName) {
   const msg = `السلام عليكم، تذكير من مدرسة أبوداوود الابتدائية: يرجى تسجيل دخول الطالب/ة ${studentName} إلى منصة نواتج التعلم (نافس) لحل اختبار هذا الأسبوع. شكرًا لتعاونكم.`;
   return `https://wa.me/${phone}?text=${encodeURIComponent(msg)}`;
@@ -262,7 +300,7 @@ async function revokeCatchupWeek(week) {
   try { await api('catchup-revoke', { method: 'POST', body: { studentId: weeksViewStudentId, week } }); render(); }
   catch (e) { alert(e.message); }
 }
-function startProxyWeek(id, week) { if (role !== 'teacher') return; proxyStudentId = id; proxyTargetWeek = week; page = 'proxy'; render(); }
+function startProxyWeek(id, week) { if (role !== 'teacher') return; proxyStudentId = id; proxyTargetWeek = week; selectedSubject = null; page = 'proxy'; render(); }
 
 // ---------- المعلمون ----------
 async function teachers() {
@@ -294,26 +332,75 @@ async function curriculumPage() {
 async function questionsPage() {
   const data = await api('questions-bank');
   const list = data.questions;
-  return `<div class="page-head"><h2>بنك الأسئلة</h2><span class="pill blue">${role === 'teacher' ? `الصف ${user.grade} — ${esc(user.subject)}` : 'الصف الثالث والسادس'}</span></div><div class="panel">${list.map(q => `<div class="question"><b>الصف ${q.grade} — ${esc(q.subject)} — الأسبوع ${q.week}</b><p>${esc(q.question)}</p><small>${esc(q.lesson || '')}</small></div>`).join('') || '<p class="muted">لا توجد أسئلة مطابقة بعد.</p>'}</div>`;
+  const addForm = role === 'teacher' ? `<div class="panel">
+    <h3>${showAddQuestionForm ? '➖ إغلاق النموذج' : '+ إضافة سؤال جديد'} <button class="small-btn" onclick="showAddQuestionForm=!showAddQuestionForm;render()">${showAddQuestionForm ? 'إغلاق' : 'إضافة سؤال'}</button></h3>
+    ${showAddQuestionForm ? `
+    <label>الأسبوع (1 إلى 17)</label><input type="number" id="newQWeek" min="1" max="17" placeholder="مثال: 5">
+    <label>الدرس / المهارة (اختياري)</label><input id="newQLesson" placeholder="مثال: الأنماط والدوال">
+    <label>نص السؤال</label><input id="newQText" placeholder="اكتب نص السؤال هنا">
+    <label>الخيارات الأربعة (حدد الدائرة بجانب الإجابة الصحيحة)</label>
+    ${[0, 1, 2, 3].map(i => `<label class="choice"><input type="radio" name="newQCorrect" value="${i}"><input type="text" id="newQChoice${i}" placeholder="الخيار ${i + 1}" style="flex:1;border:none;background:transparent;font-family:inherit;font-size:14px;outline:none"></label>`).join('')}
+    <button class="primary" style="margin-top:12px" onclick="submitNewQuestion()">حفظ السؤال</button>
+    ` : ''}
+  </div>` : '';
+  return `<div class="page-head"><h2>بنك الأسئلة</h2><span class="pill blue">${role === 'teacher' ? `الصف ${user.grade} — ${esc(user.subject)}` : 'الصف الثالث والسادس'}</span></div>
+  ${addForm}
+  <div class="panel">${list.map(q => `<div class="question"><b>الصف ${q.grade} — ${esc(q.subject)} — الأسبوع ${q.week}</b><p>${esc(q.question)}</p><small>${esc(q.lesson || '')}</small></div>`).join('') || '<p class="muted">لا توجد أسئلة مطابقة بعد.</p>'}</div>`;
+}
+async function submitNewQuestion() {
+  const week = +($('#newQWeek').value);
+  const lesson = $('#newQLesson').value.trim();
+  const question = $('#newQText').value.trim();
+  const choices = [0, 1, 2, 3].map(i => $('#newQChoice' + i).value.trim());
+  const correctRadio = document.querySelector('input[name=newQCorrect]:checked');
+  if (!week || week < 1 || week > 17) return alert('حدد رقم أسبوع صحيح بين 1 و17.');
+  if (!question) return alert('اكتب نص السؤال.');
+  if (choices.some(c => !c)) return alert('يجب تعبئة الخيارات الأربعة كلها.');
+  if (!correctRadio) return alert('حدد الإجابة الصحيحة بالضغط على الدائرة بجانبها.');
+  try {
+    await api('questions', { method: 'POST', body: { week, lesson, question, choices, answerIndex: +correctRadio.value } });
+    alert('تمت إضافة السؤال إلى بنك الأسئلة بنجاح.');
+    showAddQuestionForm = false; render();
+  } catch (e) { alert(e.message); }
 }
 
 // ---------- اختبار الطالب (نفسه) ----------
 async function tests() {
-  const path = catchupTargetWeek ? `week-test?week=${catchupTargetWeek}` : 'week-test';
+  let params = [];
+  if (catchupTargetWeek) params.push('week=' + catchupTargetWeek);
+  if (selectedSubject) params.push('subject=' + encodeURIComponent(selectedSubject));
+  const path = 'week-test' + (params.length ? '?' + params.join('&') : '');
   let r;
-  try { r = await api(path); } catch (e) { catchupTargetWeek = null; return `<div class="panel"><p class="muted">${esc(e.message)}</p><button onclick="page='home';render()">رجوع للرئيسية</button></div>`; }
+  try { r = await api(path); } catch (e) { catchupTargetWeek = null; selectedSubject = null; return `<div class="panel"><p class="muted">${esc(e.message)}</p><button onclick="page='home';render()">رجوع للرئيسية</button></div>`; }
+
+  // وضع المواد المنفصلة ولم تُحدَّد مادة بعد -> اعرض قائمة المواد لاختيار واحدة
+  if (r.mode === 'separate' && !selectedSubject) {
+    if (r.completed) {
+      catchupTargetWeek = null;
+      return `<div class="page-head"><div><h2>اختباراتي</h2><p class="muted">اختبار الأسبوع ${r.week} — أُنجزت كل المواد.</p></div><span class="pill green">مكتمل</span></div>
+      <div class="panel"><h3>نتائجك في اختبار هذا الأسبوع</h3>${r.subjects.map(s => `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line-soft)"><span>${esc(s.subject)}</span><span class="pill green">${s.correct}/${s.total} (${s.pct}%)</span></div>`).join('')}<p class="muted" style="margin-top:10px">الاختبار القادم يوم ${r.examDayNames} بإذن الله.</p></div>`;
+    }
+    if (!r.isExamDay && !r.isCatchup) {
+      return `<div class="page-head"><div><h2>اختباراتي</h2><p class="muted">لا يوجد اختبار اليوم.</p></div><span class="pill yellow">مغلق اليوم</span></div><div class="panel"><h3>موعد الاختبار القادم</h3><p>تُفتح الاختبارات يومي <b>${r.examDayNames}</b> من كل أسبوع فقط. عد إلى المنصة في أقرب يوم اختبار.</p></div>`;
+    }
+    return `<div class="page-head"><div><h2>اختباراتي</h2><p class="muted">اختبار الأسبوع ${r.week} — كل مادة تُحل على حدة. اختر مادة لتبدأ.</p></div><span class="pill green">${r.isCatchup ? 'استكمال بإذن معلمك' : r.manualOpen ? '🔓 فتح استثنائي' : 'يظهر تلقائيًا'}</span></div>
+    <div class="panel">${r.subjects.map(s => `<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--line-soft)"><span style="font-weight:700">${esc(s.subject)}</span>${s.completed ? `<span class="pill green">✓ مكتمل (${s.pct}%)</span>` : `<button class="primary small-btn" onclick="selectedSubject='${esc(s.subject)}';render()">ابدأ</button>`}</div>`).join('')}</div>`;
+  }
+
   if (r.completed) {
-    catchupTargetWeek = null;
-    return `<div class="page-head"><div><h2>اختباراتي</h2><p class="muted">اختبار الأسبوع ${r.week} — أُنجز بالفعل.</p></div><span class="pill green">مكتمل</span></div>
+    catchupTargetWeek = null; selectedSubject = null;
+    return `<div class="page-head"><div><h2>اختباراتي</h2><p class="muted">اختبار الأسبوع ${r.week}${r.subject ? ' — ' + esc(r.subject) : ''} — أُنجز بالفعل.</p></div><span class="pill green">مكتمل</span></div>
     <div class="panel"><h3>نتيجتك في اختبار هذا الأسبوع</h3><div class="cards"><div class="stat">الأسئلة<b>${r.result.total}</b></div><div class="stat">صحيح 🟢<b>${r.result.correct}</b></div><div class="stat">خطأ 🔴<b>${r.result.wrong}</b></div><div class="stat">النسبة<b>${r.result.pct}%</b></div></div><p style="font-size:16px;font-weight:800;color:var(--teal);margin-top:6px">${r.result.message}</p><p class="muted" style="margin-top:10px">الاختبار القادم يوم ${r.examDayNames} بإذن الله.</p></div>`;
   }
   if (!r.isExamDay && !r.isCatchup) {
+    selectedSubject = null;
     return `<div class="page-head"><div><h2>اختباراتي</h2><p class="muted">لا يوجد اختبار اليوم.</p></div><span class="pill yellow">مغلق اليوم</span></div><div class="panel"><h3>موعد الاختبار القادم</h3><p>تُفتح الاختبارات يومي <b>${r.examDayNames}</b> من كل أسبوع فقط. عد إلى المنصة في أقرب يوم اختبار.</p></div>`;
   }
   if (!r.questions.length) {
     return `<div class="page-head"><h2>اختباراتي</h2></div><div class="panel"><p class="muted">لا توجد أسئلة مجهزة لهذا الأسبوع بعد.</p></div>`;
   }
-  return `<div class="page-head"><div><h2>اختباراتي</h2><p class="muted">اختبار الأسبوع ${r.week}${r.isCatchup ? ' (استكمال أسبوع فائت)' : ''} — أجب عن جميع الأسئلة ثم أرسل الإجابات.</p></div><span class="pill green">${r.isCatchup ? 'استكمال بإذن معلمك' : 'يظهر تلقائيًا'}</span></div><div class="panel"><h3>اختبار الأسبوع</h3>${r.questions.map((q, i) => `<div class="question"><b>${i + 1}. ${esc(q.question)}</b><div class="muted" style="margin-top:5px;font-weight:600">${esc(q.subject)}</div>${q.choices.map((c, j) => `<label class="choice"><input type="radio" name="q_${q.id}" value="${j}"><span>${esc(c)}</span></label>`).join('')}</div>`).join('')}<button class="primary" onclick="submitTest()">إرسال الإجابات</button></div>`;
+  const backBtn = r.mode === 'separate' ? `<button onclick="selectedSubject=null;render()">رجوع لقائمة المواد</button>` : '';
+  return `<div class="page-head"><div><h2>اختباراتي</h2><p class="muted">اختبار الأسبوع ${r.week}${r.subject ? ' — ' + esc(r.subject) : ''}${r.isCatchup ? ' (استكمال أسبوع فائت)' : ''}${r.manualOpen ? ' — فُتح اليوم استثنائيًا من المشرف' : ''} — أجب عن جميع الأسئلة ثم أرسل الإجابات.</p></div><span class="pill green">${r.isCatchup ? 'استكمال بإذن معلمك' : r.manualOpen ? '🔓 فتح استثنائي' : 'يظهر تلقائيًا'}</span></div><div class="panel"><h3>اختبار الأسبوع</h3>${r.questions.map((q, i) => `<div class="question"><b>${i + 1}. ${esc(q.question)}</b><div class="muted" style="margin-top:5px;font-weight:600">${esc(q.subject)}</div>${q.choices.map((c, j) => `<label class="choice"><input type="radio" name="q_${q.id}" value="${j}"><span>${esc(c)}</span></label>`).join('')}</div>`).join('')}<div class="actions"><button class="primary" onclick="submitTest()">إرسال الإجابات</button>${backBtn}</div></div>`;
 }
 async function submitTest() {
   const questionBlocks = document.querySelectorAll('#page .question');
@@ -327,9 +414,16 @@ async function submitTest() {
     if (checked) answers[qid] = +checked.value; else missing++;
   });
   if (missing > 0) { alert(`يجب الإجابة عن جميع الأسئلة قبل الإرسال. متبقٍ ${missing} سؤالًا بدون إجابة.`); return; }
-  const body = catchupTargetWeek ? { answers, week: catchupTargetWeek } : { answers };
-  try { await api('week-test/submit', { method: 'POST', body }); catchupTargetWeek = null; page = 'results'; await render(); }
-  catch (e) { alert(e.message); await render(); }
+  const body = { answers };
+  if (catchupTargetWeek) body.week = catchupTargetWeek;
+  const wasSeparate = !!selectedSubject;
+  if (selectedSubject) body.subject = selectedSubject;
+  try {
+    await api('week-test/submit', { method: 'POST', body });
+    catchupTargetWeek = null; selectedSubject = null;
+    page = wasSeparate ? 'tests' : 'results';
+    await render();
+  } catch (e) { alert(e.message); await render(); }
 }
 async function results() {
   const r = await api('my-results');
@@ -375,22 +469,35 @@ async function myQuestionBank() {
 }
 
 // ---------- فتح اختبار الطالب من حساب المعلم ----------
-function startProxy(id) { if (role !== 'teacher') return; proxyStudentId = id; proxyTargetWeek = null; page = 'proxy'; render(); }
+function startProxy(id) { if (role !== 'teacher') return; proxyStudentId = id; proxyTargetWeek = null; selectedSubject = null; page = 'proxy'; render(); }
 async function proxy() {
   if (!proxyStudentId) return `<div class="panel"><h3>اختر طالبًا</h3><button class="primary" onclick="page='students';render()">اختيار من قائمة الطلاب</button></div>`;
   let r;
-  const path = proxyTargetWeek ? `week-test?studentId=${encodeURIComponent(proxyStudentId)}&week=${proxyTargetWeek}` : `week-test?studentId=${encodeURIComponent(proxyStudentId)}`;
-  try { r = await api(path); }
-  catch (e) { proxyStudentId = null; proxyTargetWeek = null; return `<div class="panel"><p class="muted">${esc(e.message)}</p><button onclick="page='students';render()">رجوع</button></div>`; }
+  let params = [`studentId=${encodeURIComponent(proxyStudentId)}`];
+  if (proxyTargetWeek) params.push(`week=${proxyTargetWeek}`);
+  if (selectedSubject) params.push(`subject=${encodeURIComponent(selectedSubject)}`);
+  try { r = await api('week-test?' + params.join('&')); }
+  catch (e) { proxyStudentId = null; proxyTargetWeek = null; selectedSubject = null; return `<div class="panel"><p class="muted">${esc(e.message)}</p><button onclick="page='students';render()">رجوع</button></div>`; }
   const st = r.student;
+
+  if (r.mode === 'separate' && !selectedSubject) {
+    if (r.completed) {
+      return `<div class="page-head"><div><h2>اختبار الطالب</h2><p class="muted">الطالب: <b>${esc(st.name)}</b> — الصف ${st.grade} — الفصل ${esc(st.class)}</p></div><span class="pill green">مكتمل هذا الأسبوع</span></div>
+      <div class="panel"><h3>نتائج اختبار الأسبوع ${r.week}</h3>${r.subjects.map(s => `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line-soft)"><span>${esc(s.subject)}</span><span class="pill green">${s.correct}/${s.total} (${s.pct}%)</span></div>`).join('')}<button onclick="proxyStudentId=null;proxyTargetWeek=null;page='students';render()" style="margin-top:12px">رجوع لقائمة الطلاب</button></div>`;
+    }
+    return `<div class="page-head"><div><h2>اختبار الطالب</h2><p class="muted">الطالب: <b>${esc(st.name)}</b> — الصف ${st.grade} — الفصل ${esc(st.class)} — كل مادة تُحل على حدة</p></div><span class="pill yellow">${r.isCatchup ? 'استكمال أسبوع فائت' : 'اختر مادة'}</span></div>
+    <div class="panel">${r.subjects.map(s => `<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--line-soft)"><span style="font-weight:700">${esc(s.subject)}</span>${s.completed ? `<span class="pill green">✓ مكتمل (${s.pct}%)</span>` : `<button class="primary small-btn" onclick="selectedSubject='${esc(s.subject)}';render()">ابدأ</button>`}</div>`).join('')}<button onclick="proxyStudentId=null;proxyTargetWeek=null;page='students';render()" style="margin-top:12px">إلغاء</button></div>`;
+  }
+
   if (r.completed) {
-    return `<div class="page-head"><div><h2>اختبار الطالب</h2><p class="muted">الطالب: <b>${esc(st.name)}</b> — الصف ${st.grade} — الفصل ${esc(st.class)}</p></div><span class="pill green">مكتمل هذا الأسبوع</span></div><div class="panel"><h3>نتيجة اختبار الأسبوع ${r.week}</h3><p>حصل الطالب على ${r.result.correct} من ${r.result.total} (${r.result.pct}%).</p><p style="font-weight:800;color:var(--teal)">${r.result.message}</p><button onclick="proxyStudentId=null;proxyTargetWeek=null;page='students';render()">رجوع لقائمة الطلاب</button></div>`;
+    return `<div class="page-head"><div><h2>اختبار الطالب</h2><p class="muted">الطالب: <b>${esc(st.name)}</b> — الصف ${st.grade} — الفصل ${esc(st.class)}</p></div><span class="pill green">مكتمل هذا الأسبوع</span></div><div class="panel"><h3>نتيجة اختبار الأسبوع ${r.week}${r.subject ? ' — ' + esc(r.subject) : ''}</h3><p>حصل الطالب على ${r.result.correct} من ${r.result.total} (${r.result.pct}%).</p><p style="font-weight:800;color:var(--teal)">${r.result.message}</p><button onclick="proxyStudentId=null;proxyTargetWeek=null;selectedSubject=null;page='students';render()">رجوع لقائمة الطلاب</button></div>`;
   }
   if (!r.questions.length) return `<div class="panel"><p class="muted">لا توجد أسئلة مجهزة لهذا الأسبوع بعد.</p></div>`;
+  const backBtn = r.mode === 'separate' ? `<button onclick="selectedSubject=null;render()">رجوع لقائمة المواد</button>` : '';
   return `<div class="page-head"><div><h2>اختبار الطالب</h2><p class="muted">الطالب: <b>${esc(st.name)}</b> — الصف ${st.grade} — الفصل ${esc(st.class)}</p></div><span class="pill yellow">${r.isCatchup ? 'استكمال أسبوع فائت — من حساب المعلم' : 'الطالب يحل من حساب المعلم'}</span></div>
   <div class="proxy-banner"><div><strong>تنبيه مهم</strong><p>تُحفظ الإجابات باسم الطالب. المعلم يفتح ملف الطالب فقط، ثم الطالب نفسه يختار الإجابات ويحل الاختبار. يجب الإجابة عن جميع الأسئلة.</p></div></div>
   <div class="panel"><label>حالة الدخول</label><select id="proxyReason"><option>الطالب يحل من جهاز المعلم</option><option>تعذر دخول الطالب من المنزل</option><option>استكمال أسبوع فائت</option><option>مشكلة تقنية لدى الطالب</option></select></div>
-  <div class="panel"><h3>اختبار الأسبوع ${r.week}</h3>${r.questions.map((q, i) => `<div class="question"><b>${i + 1}. ${esc(q.question)}</b><div class="muted" style="margin-top:5px">${esc(q.subject)} — الأسبوع ${q.week} — ${esc(q.lesson || '')}</div>${q.choices.map((c, j) => `<label class="choice"><input type="radio" name="pq_${q.id}" value="${j}"><span>${esc(c)}</span></label>`).join('')}</div>`).join('')}<div class="actions"><button class="primary" onclick="submitProxyTest()">حفظ إجابات الطالب</button><button onclick="proxyStudentId=null;proxyTargetWeek=null;page='students';render()">إلغاء</button></div></div>`;
+  <div class="panel"><h3>اختبار الأسبوع ${r.week}${r.subject ? ' — ' + esc(r.subject) : ''}</h3>${r.questions.map((q, i) => `<div class="question"><b>${i + 1}. ${esc(q.question)}</b><div class="muted" style="margin-top:5px">${esc(q.subject)} — الأسبوع ${q.week} — ${esc(q.lesson || '')}</div>${q.choices.map((c, j) => `<label class="choice"><input type="radio" name="pq_${q.id}" value="${j}"><span>${esc(c)}</span></label>`).join('')}</div>`).join('')}<div class="actions"><button class="primary" onclick="submitProxyTest()">حفظ إجابات الطالب</button><button onclick="proxyStudentId=null;proxyTargetWeek=null;selectedSubject=null;page='students';render()">إلغاء</button>${backBtn}</div></div>`;
 }
 async function submitProxyTest() {
   if (!proxyStudentId) return;
@@ -409,9 +516,13 @@ async function submitProxyTest() {
   try {
     const body = { studentId: proxyStudentId, answers, reason };
     if (proxyTargetWeek) body.week = proxyTargetWeek;
+    const wasSeparate = !!selectedSubject;
+    if (selectedSubject) body.subject = selectedSubject;
     const res = await api('week-test/submit', { method: 'POST', body });
     alert(`تم حفظ ${res.total} إجابة باسم الطالب ${res.studentName}.\nالطالب هو من أجاب، وتم تسجيل أن الجلسة تمت من حساب المعلم.\nالحالة: ${reason}`);
-    proxyStudentId = null; proxyTargetWeek = null; page = 'reports'; await render();
+    selectedSubject = null;
+    if (wasSeparate) { await render(); } // ابقَ في صفحة الطالب لإكمال بقية المواد
+    else { proxyStudentId = null; proxyTargetWeek = null; page = 'reports'; await render(); }
   } catch (e) { alert(e.message); }
 }
 
@@ -438,7 +549,23 @@ async function settings() {
   const opts2 = DAY_CODES.map(c => `<option value="${c}" ${s.examDays[1] === c ? 'selected' : ''}>${DAY_NAMES[c]}</option>`).join('');
   return `<div class="page-head"><h2>إعدادات الاختبارات</h2></div><div class="panel"><h3>يومان في الأسبوع</h3><div class="grid2"><div><label>اليوم الأول</label><select id="examDay1" onchange="updateExamDays()">${opts1}</select></div><div><label>اليوم الثاني</label><select id="examDay2" onchange="updateExamDays()">${opts2}</select></div></div><p class="muted">الاختبار يُنشر تلقائيًا وفق الخطة المرفقة أيام <b>${DAY_NAMES[s.examDays[0]]} و${DAY_NAMES[s.examDays[1]]}</b> فقط، دون اعتماد المعلم.</p></div>
   <div class="panel"><h3>بداية الفصل الدراسي</h3><label>تاريخ بداية الفصل (لحساب أسبوع المنهج الحالي)</label><input type="date" id="semStart" value="${s.semesterStart}" onchange="updateSemesterStart()"><p class="muted" style="margin-top:8px">الأسبوع الحالي وفق هذا التاريخ: <b>${s.currentWeek}</b> من 17.</p></div>
+  <div class="panel" style="border-color:${s.manualOpenWeek ? '#e7c26f' : 'var(--line-soft)'}"><h3>🔓 فتح استثنائي (عطلة أو ظرف طارئ)</h3><p class="muted">استخدم هذا فقط إذا صادف يوم الاختبار المعتاد إجازة رسمية، لفتح اختبار الأسبوع الحالي (${s.currentWeek}) لجميع الطلاب اليوم بشكل استثنائي، دون تعديل الجدول التلقائي.</p>
+  ${s.manualOpenWeek ? `<p style="font-weight:800;color:var(--yellow)">مُفعَّل الآن للأسبوع ${s.manualOpenWeek}</p><button class="danger" onclick="clearManualOpen()">إلغاء الفتح الاستثنائي</button>` : `<button class="primary" onclick="setManualOpen(${s.currentWeek})">فتح اختبار الأسبوع ${s.currentWeek} اليوم استثنائيًا</button>`}</div>
+  <div class="panel"><h3>📚 طريقة فتح المواد</h3><p class="muted">مجتمعة: كل مواد الطالب (لغتي/رياضيات/علوم) تظهر معًا في اختبار واحد بجلسة واحدة (الطريقة الحالية). منفصلة: كل مادة تفتح وتُنجز على حدة، ويمكن للطالب إكمالها بأوقات مختلفة.</p>
+  <div class="tabs" style="max-width:360px"><button class="tab ${!s.subjectsSeparate ? 'active' : ''}" onclick="setSubjectsMode(false)">مجتمعة (الحالية)</button><button class="tab ${s.subjectsSeparate ? 'active' : ''}" onclick="setSubjectsMode(true)">منفصلة (كل مادة لوحدها)</button></div></div>
   <div class="panel"><h3>بيانات دخول المشرف</h3><p class="muted">اسم المستخدم الحالي: <b>${esc(s.supervisorUsername)}</b></p><button onclick="changeSupervisorPass()">تغيير اسم المستخدم/كلمة المرور</button></div>`;
+}
+async function setSubjectsMode(sep) {
+  try { await api('settings', { method: 'PUT', body: { subjectsSeparate: sep } }); render(); }
+  catch (e) { alert(e.message); }
+}
+async function setManualOpen(week) {
+  try { await api('settings', { method: 'PUT', body: { manualOpenWeek: week } }); render(); }
+  catch (e) { alert(e.message); }
+}
+async function clearManualOpen() {
+  try { await api('settings', { method: 'PUT', body: { manualOpenWeek: null } }); render(); }
+  catch (e) { alert(e.message); }
 }
 async function updateExamDays() {
   try { await api('settings', { method: 'PUT', body: { examDays: [$('#examDay1').value, $('#examDay2').value] } }); render(); }
