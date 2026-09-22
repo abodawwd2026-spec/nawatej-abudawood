@@ -186,8 +186,8 @@ async function createStudent(session, env, request) {
   let body; try { body = await request.json(); } catch { return badRequest(); }
   const { id, name, grade, class: className, phone } = body || {};
   if (!id || !name || !grade || !className) return badRequest('بيانات ناقصة');
-  const exists = await env.DB.prepare('SELECT id FROM students WHERE id=?').bind(String(id)).first();
-  if (exists) return badRequest('رقم الهوية مسجل مسبقًا');
+  const exists = await env.DB.prepare('SELECT id,active FROM students WHERE id=?').bind(String(id)).first();
+  if (exists) return badRequest(exists.active ? 'رقم الهوية مسجل مسبقًا' : 'رقم الهوية كان لطالب محذوف — استخدم "استعادة الطلاب المحذوفين" بدلاً من الإضافة من جديد');
   await env.DB.prepare('INSERT INTO students(id,name,grade,class_name,parent_phone) VALUES (?,?,?,?,?)').bind(String(id), name, Number(grade), className, normalizePhone(phone)).run();
   return json({ ok: true });
 }
@@ -203,6 +203,27 @@ async function deleteStudent(session, env, id) {
   if (session.role !== 'supervisor') return forbidden();
   await env.DB.prepare('UPDATE students SET active=0 WHERE id=?').bind(id).run(); // حذف ناعم: تبقى نتائجه التاريخية محفوظة
   return json({ ok: true });
+}
+// ---------- الطلاب المحذوفون: عرض واستعادة ----------
+async function listDeletedStudents(session, env) {
+  if (session.role !== 'supervisor') return forbidden();
+  const { results } = await env.DB.prepare('SELECT id,name,grade,class_name,parent_phone FROM students WHERE active=0 ORDER BY grade,class_name,name').all();
+  return json({ ok: true, students: results.map(r => ({ id: r.id, name: r.name, grade: r.grade, class: r.class_name, phone: r.parent_phone || null })) });
+}
+async function restoreStudent(session, env, id) {
+  if (session.role !== 'supervisor') return forbidden();
+  const existing = await env.DB.prepare('SELECT id FROM students WHERE id=? AND active=0').bind(id).first();
+  if (!existing) return badRequest('لا يوجد طالب محذوف بهذا الرقم');
+  await env.DB.prepare('UPDATE students SET active=1 WHERE id=?').bind(id).run();
+  return json({ ok: true });
+}
+// ---------- حذف كل إجابات طالب معيّن (تصفير سجله بالكامل، دون حذف الطالب نفسه) ----------
+async function clearStudentAttempts(session, env, id) {
+  if (session.role !== 'supervisor') return forbidden();
+  const existing = await env.DB.prepare('SELECT id FROM students WHERE id=?').bind(id).first();
+  if (!existing) return badRequest('طالب غير موجود');
+  const r = await env.DB.prepare('DELETE FROM attempts WHERE student_id=?').bind(id).run();
+  return json({ ok: true, deleted: (r.meta && r.meta.changes) || 0 });
 }
 async function importPhones(session, env, request) {
   if (session.role !== 'supervisor') return forbidden();
@@ -279,6 +300,41 @@ async function deleteTeacher(session, env, username) {
   if (session.role !== 'supervisor') return forbidden();
   await env.DB.prepare('UPDATE teachers SET active=0 WHERE username=?').bind(username).run();
   return json({ ok: true });
+}
+async function updateTeacher(session, env, request, currentUsername) {
+  if (session.role !== 'supervisor') return forbidden();
+  let body; try { body = await request.json(); } catch { return badRequest(); }
+  const { name, username, subject, grade, classes, password } = body || {};
+  const existing = await env.DB.prepare('SELECT * FROM teachers WHERE username=? AND active=1').bind(currentUsername).first();
+  if (!existing) return badRequest('المعلم غير موجود');
+  if (username && username !== currentUsername) {
+    const clash = await env.DB.prepare('SELECT id FROM teachers WHERE username=?').bind(username).first();
+    if (clash) return badRequest('اسم المستخدم الجديد مستخدم من قبل، اختر اسمًا آخر');
+  }
+  let hash = existing.password_hash;
+  if (password) hash = await hashPassword(password);
+  await env.DB.prepare('UPDATE teachers SET name=?, username=?, password_hash=?, subject=?, grade=?, classes=? WHERE username=?')
+    .bind(name || existing.name, username || currentUsername, hash, subject || existing.subject, grade ? Number(grade) : existing.grade, classes || existing.classes, currentUsername).run();
+  return json({ ok: true });
+}
+
+// ---------- منح صلاحية استكمال أسبوع فائت لجميع طلاب المعلم دفعة واحدة ----------
+async function grantCatchupBulk(session, env, request) {
+  if (session.role !== 'teacher') return forbidden();
+  let body; try { body = await request.json(); } catch { return badRequest(); }
+  const week = Number(body && body.week);
+  const settings = await readSettings(env);
+  const currentWk = weekNumber(settings.semesterStart);
+  if (!Number.isInteger(week) || week < 1 || week >= currentWk) return badRequest('أسبوع غير صالح');
+  const classes = parseClasses(session.classes);
+  if (!classes.length) return json({ ok: true, count: 0 });
+  const ph = classes.map(() => '?').join(',');
+  const { results } = await env.DB.prepare(`SELECT id FROM students WHERE active=1 AND grade=? AND class_name IN (${ph})`).bind(session.grade, ...classes).all();
+  const now = new Date().toISOString();
+  for (const s of results) {
+    await env.DB.prepare('INSERT OR IGNORE INTO catchup_grants(student_id,week,granted_by,granted_at) VALUES (?,?,?,?)').bind(s.id, week, session.ref_id, now).run();
+  }
+  return json({ ok: true, count: results.length });
 }
 
 // ---------- المنهج وبنك الأسئلة (عرض فقط، بلا إجابات) ----------
@@ -593,12 +649,12 @@ async function reportsStats(session, env) {
   let allowedIds = null;
   if (session.role === 'teacher') {
     const classes = parseClasses(session.classes);
-    if (!classes.length) return json({ ok: true, weeks: [] });
+    if (!classes.length) return json({ ok: true, weeks: [], bySubject: [] });
     const ph = classes.map(() => '?').join(',');
     const { results } = await env.DB.prepare(`SELECT id FROM students WHERE active=1 AND grade=? AND class_name IN (${ph})`).bind(session.grade, ...classes).all();
     allowedIds = new Set(results.map(r => r.id));
   }
-  const { results: rows } = await env.DB.prepare('SELECT student_id, week, correct FROM attempts').all();
+  const { results: rows } = await env.DB.prepare('SELECT student_id, week, subject, correct FROM attempts').all();
   const filtered = allowedIds ? rows.filter(r => allowedIds.has(r.student_id)) : rows;
   const byWeekMap = {};
   filtered.forEach(r => { byWeekMap[r.week] = byWeekMap[r.week] || { total: 0, correct: 0 }; byWeekMap[r.week].total++; if (r.correct) byWeekMap[r.week].correct++; });
@@ -606,7 +662,17 @@ async function reportsStats(session, env) {
     .map(w => ({ week: w, total: byWeekMap[w].total, correct: byWeekMap[w].correct, pct: Math.round((byWeekMap[w].correct / byWeekMap[w].total) * 100) }));
   let change = null;
   if (weeks.length >= 2) change = weeks[weeks.length - 1].pct - weeks[weeks.length - 2].pct;
-  return json({ ok: true, weeks, change });
+
+  const bySubjectMap = {};
+  filtered.forEach(r => { bySubjectMap[r.subject] = bySubjectMap[r.subject] || { total: 0, correct: 0 }; bySubjectMap[r.subject].total++; if (r.correct) bySubjectMap[r.subject].correct++; });
+  const bySubject = Object.keys(bySubjectMap).sort()
+    .map(s => ({ subject: s, total: bySubjectMap[s].total, correct: bySubjectMap[s].correct, pct: Math.round((bySubjectMap[s].correct / bySubjectMap[s].total) * 100) }));
+
+  const totalAttempts = filtered.length;
+  const totalCorrect = filtered.filter(r => r.correct).length;
+  const overallPct = totalAttempts ? Math.round((totalCorrect / totalAttempts) * 100) : null;
+
+  return json({ ok: true, weeks, change, bySubject, overallPct, totalAttempts });
 }
 
 // ---------- نظرة عامة على الطلاب (للتقارير ولوحة المتابعة عند المعلم/المشرف) ----------
@@ -707,11 +773,15 @@ async function handleApi(request, env, path) {
     if (method === 'POST' && path === 'students') return await createStudent(session, env, request);
     if (method === 'POST' && path === 'students/import-phones') return await importPhones(session, env, request);
     if (method === 'POST' && path === 'students/sync-excel') return await syncStudentsExcel(session, env, request);
-    if (method === 'PUT' && seg[0] === 'students' && seg[1]) return await updateStudent(session, env, request, decodeURIComponent(seg[1]));
-    if (method === 'DELETE' && seg[0] === 'students' && seg[1]) return await deleteStudent(session, env, decodeURIComponent(seg[1]));
+    if (method === 'PUT' && seg[0] === 'students' && seg[1] && !seg[2]) return await updateStudent(session, env, request, decodeURIComponent(seg[1]));
+    if (method === 'DELETE' && seg[0] === 'students' && seg[1] && !seg[2]) return await deleteStudent(session, env, decodeURIComponent(seg[1]));
+    if (method === 'GET' && path === 'students-deleted') return await listDeletedStudents(session, env);
+    if (method === 'POST' && seg[0] === 'students' && seg[1] && seg[2] === 'restore') return await restoreStudent(session, env, decodeURIComponent(seg[1]));
+    if (method === 'POST' && seg[0] === 'students' && seg[1] && seg[2] === 'clear-attempts') return await clearStudentAttempts(session, env, decodeURIComponent(seg[1]));
 
     if (method === 'GET' && path === 'teachers') return await listTeachers(session, env);
     if (method === 'POST' && path === 'teachers') return await createTeacher(session, env, request);
+    if (method === 'PUT' && seg[0] === 'teachers' && seg[1]) return await updateTeacher(session, env, request, decodeURIComponent(seg[1]));
     if (method === 'DELETE' && seg[0] === 'teachers' && seg[1]) return await deleteTeacher(session, env, decodeURIComponent(seg[1]));
 
     if (method === 'GET' && path === 'curriculum') return await getCurriculum(env);
@@ -723,6 +793,7 @@ async function handleApi(request, env, path) {
     if (method === 'GET' && path === 'my-missed-weeks') return await myMissedWeeks(session, env);
     if (method === 'GET' && path === 'my-question-bank') return await myQuestionBank(session, env);
     if (method === 'POST' && path === 'catchup-grant') return await grantCatchup(session, env, request);
+    if (method === 'POST' && path === 'catchup-grant-bulk') return await grantCatchupBulk(session, env, request);
     if (method === 'POST' && path === 'catchup-revoke') return await revokeCatchup(session, env, request);
     if (method === 'GET' && path === 'student-weeks') return await studentWeeksStatus(session, env, url);
 
