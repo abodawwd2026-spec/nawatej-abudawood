@@ -57,7 +57,7 @@ function weekNumber(semesterStart) {
   const [y2, m2, d2] = String(semesterStart).split('-').map(Number);
   const days = Math.floor((Date.UTC(y1, m1 - 1, d1) - Date.UTC(y2, m2 - 1, d2)) / 86400000);
   let w = Math.floor(days / 7) + 1;
-  if (w < 1) w = 1; if (w > 17) w = 17;
+  if (w < 1) w = 1; if (w > 27) w = 27;
   return w;
 }
 function motivationLine(pct) {
@@ -360,7 +360,7 @@ async function createQuestion(session, env, request) {
   let body; try { body = await request.json(); } catch { return badRequest(); }
   const { week, lesson, question, choices, answerIndex } = body || {};
   const w = Number(week);
-  if (!Number.isInteger(w) || w < 1 || w > 17) return badRequest('رقم الأسبوع يجب أن يكون بين 1 و17');
+  if (!Number.isInteger(w) || w < 1 || w > 27) return badRequest('رقم الأسبوع يجب أن يكون بين 1 و27');
   if (!question || !String(question).trim()) return badRequest('نص السؤال مطلوب');
   if (!Array.isArray(choices) || choices.length < 2 || choices.some(c => !c || !String(c).trim())) return badRequest('يجب إدخال خيارين على الأقل، كلها غير فارغة');
   const ai = Number(answerIndex);
@@ -732,7 +732,7 @@ async function putSettingsRoute(session, env, request) {
   }
   if (manualOpenWeek !== undefined) {
     if (manualOpenWeek === null || manualOpenWeek === '') await upsertSetting(env, 'manual_open_week', '');
-    else if (Number.isInteger(Number(manualOpenWeek)) && Number(manualOpenWeek) >= 1 && Number(manualOpenWeek) <= 17) await upsertSetting(env, 'manual_open_week', String(Number(manualOpenWeek)));
+    else if (Number.isInteger(Number(manualOpenWeek)) && Number(manualOpenWeek) >= 1 && Number(manualOpenWeek) <= 27) await upsertSetting(env, 'manual_open_week', String(Number(manualOpenWeek)));
     else return badRequest('رقم أسبوع غير صالح');
   }
   if (subjectsSeparate !== undefined) {
