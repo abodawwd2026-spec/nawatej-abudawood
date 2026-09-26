@@ -513,7 +513,7 @@ async function myQuestionBank() {
 }
 
 // ---------- فتح اختبار الطالب من حساب المعلم ----------
-function startProxy(id) { if (role !== 'teacher') return; proxyStudentId = id; proxyTargetWeek = null; selectedSubject = null; page = 'proxy'; render(); }
+function startProxy(id) { if (role !== 'teacher' && role !== 'supervisor') return; proxyStudentId = id; proxyTargetWeek = null; selectedSubject = null; page = 'proxy'; render(); }
 async function proxy() {
   if (!proxyStudentId) return `<div class="panel"><h3>اختر طالبًا</h3><button class="primary" onclick="page='students';render()">اختيار من قائمة الطلاب</button></div>`;
   let r;
@@ -604,6 +604,29 @@ function generateInsights(stats, students) {
   return lines;
 }
 
+function whatsappConcernLink(phone, studentName) {
+  const msg = `السلام عليكم، نأمل من الله ثم منكم متابعة الطالب/ة ${studentName}، حيث لاحظنا تعثرًا في أداء اختبارات نواتج التعلم الأسبوعية. نرجو المتابعة والمراجعة معه/ا في المنزل، ونحن جاهزون لأي دعم إضافي يلزم. شكرًا لتعاونكم.`;
+  return `https://wa.me/${phone}?text=${encodeURIComponent(msg)}`;
+}
+function studentActionButtons(s) {
+  const canProxy = role === 'teacher' || role === 'supervisor';
+  const parts = [];
+  if (canProxy) parts.push(`<button class="small-btn" onclick="startProxy('${esc(s.id)}')">✏️ حل من الحساب</button>`);
+  if (s.phone) {
+    parts.push(`<a href="${whatsappLink(s.phone, s.name)}" target="_blank" rel="noopener" class="small-btn" style="display:inline-block;text-decoration:none;border:1.5px solid var(--line);border-radius:9px;padding:6px 12px;color:var(--ink)">📱 تذكير بالاختبار</a>`);
+    if (s.status === 'struggling') parts.push(`<a href="${whatsappConcernLink(s.phone, s.name)}" target="_blank" rel="noopener" class="small-btn" style="display:inline-block;text-decoration:none;border:1.5px solid var(--red);border-radius:9px;padding:6px 12px;color:var(--red)">📱 إشعار ولي الأمر</a>`);
+  } else {
+    parts.push('<span class="muted" style="font-size:12px">لا يوجد جوال</span>');
+  }
+  return `<div class="actions" style="margin:0;flex-wrap:wrap">${parts.join('')}</div>`;
+}
+function studentCategoryPanel(title, icon, borderColor, students) {
+  if (!students.length) return `<div class="panel"><h3>${icon} ${title}</h3><p class="muted">لا يوجد طلاب في هذه الفئة حاليًا.</p></div>`;
+  return `<div class="panel" style="border-color:${borderColor}"><h3>${icon} ${title} (${students.length})</h3>
+  <table><thead><tr><th>الطالب</th><th>الصف</th><th>الفصل</th><th>حل</th><th>صحيح</th><th>خطأ</th><th>إجراءات المعلم/المشرف</th></tr></thead><tbody>
+  ${students.map(s => `<tr><td>${esc(s.name)}</td><td>${s.grade}</td><td>${esc(s.class)}</td><td>${s.total}</td><td>${s.correct}</td><td>${s.wrong}</td><td>${studentActionButtons(s)}</td></tr>`).join('')}
+  </tbody></table></div>`;
+}
 async function reports() {
   const ov = await api('students-overview');
   const list = ov.students;
@@ -614,11 +637,20 @@ async function reports() {
   const subjectChart = stats && stats.bySubject && stats.bySubject.length ? `<div class="panel"><h3>مقارنة الأداء بين المواد</h3><div style="margin-top:14px">${barChart(stats.bySubject.map(s => ({ label: s.subject, value: s.pct })))}</div></div>` : '';
   const insights = stats ? generateInsights(stats, list) : [];
   const insightsPanel = `<div class="panel" style="background:linear-gradient(135deg,#f4f1ff,#eef6ff);border-color:#c9b8f0"><h3>🧠 قياس الأثر — تحليل تلقائي</h3><ul style="margin:10px 0 0;padding-inline-start:22px;line-height:2.1">${insights.map(l => `<li>${l}</li>`).join('')}</ul></div>`;
-  return `<div class="page-head"><div><h2>التقارير</h2><p class="muted">${role === 'teacher' ? 'تقارير طلاب فصولك المسندة فقط. ' : ''}يظهر هنا أيضًا إذا كانت الإجابة من الطالب أو نيابةً عنه بواسطة المعلم.</p></div><button onclick="window.print()">طباعة / PDF</button></div>
+
+  const struggling = list.filter(s => s.status === 'struggling');
+  const mastering = list.filter(s => s.status === 'ok');
+  const notStarted = list.filter(s => s.status === 'not_started');
+  const categoriesPanels = studentCategoryPanel('الطلاب المخفقون (متعثرون)', '🔴', 'var(--red)', struggling)
+    + studentCategoryPanel('الطلاب المتقنون', '🟢', 'var(--green)', mastering)
+    + studentCategoryPanel('الطلاب الذين لم يحلّوا بعد', '🟡', '#e7c26f', notStarted);
+
+  return `<div class="page-head"><div><h2>التقارير</h2><p class="muted">${role === 'teacher' ? 'تقارير طلاب فصولك المسندة فقط. ' : ''}يظهر هنا أيضًا إذا كانت الإجابة من الطالب أو نيابةً عنه بواسطة المعلم أو المشرف.</p></div><button onclick="window.print()">طباعة / PDF</button></div>
   ${insightsPanel}
   ${weekChart}
   ${subjectChart}
-  <div class="panel"><table><thead><tr><th>الطالب</th><th>الصف</th><th>الفصل</th><th>الحالة</th><th>حل</th><th>صحيح</th><th>خطأ</th><th>طريقة الحل</th><th>تذكير</th></tr></thead><tbody>${list.map(s => `<tr><td>${esc(s.name)}</td><td>${s.grade}</td><td>${esc(s.class)}</td><td>${statusBadge(s)}</td><td>${s.total}</td><td>${s.correct}</td><td>${s.wrong}</td><td>${s.proxyCount ? `<span class="pill yellow">${s.proxyCount} من جلسة حساب المعلم</span>` : '<span class="pill green">من حساب الطالب</span>'}</td><td>${!s.currentWeekDone && s.phone ? `<a href="${whatsappLink(s.phone, s.name)}" target="_blank" rel="noopener" class="small-btn" style="display:inline-block;text-decoration:none;border:1.5px solid var(--line);border-radius:9px;padding:8px 14px;color:var(--ink)">📱 واتساب</a>` : (!s.currentWeekDone ? '<span class="muted" style="font-size:12px">لا يوجد جوال</span>' : '—')}</td></tr>`).join('') || '<tr><td colspan="9">لا يوجد طلاب.</td></tr>'}</tbody></table></div>`;
+  ${categoriesPanels}
+  <div class="panel"><h3>كل الطلاب</h3><table><thead><tr><th>الطالب</th><th>الصف</th><th>الفصل</th><th>الحالة</th><th>حل</th><th>صحيح</th><th>خطأ</th><th>طريقة الحل</th><th>إجراءات</th></tr></thead><tbody>${list.map(s => `<tr><td>${esc(s.name)}</td><td>${s.grade}</td><td>${esc(s.class)}</td><td>${statusBadge(s)}</td><td>${s.total}</td><td>${s.correct}</td><td>${s.wrong}</td><td>${s.proxyCount ? `<span class="pill yellow">${s.proxyCount} من جلسة حساب المعلم/المشرف</span>` : '<span class="pill green">من حساب الطالب</span>'}</td><td>${studentActionButtons(s)}</td></tr>`).join('') || '<tr><td colspan="9">لا يوجد طلاب.</td></tr>'}</tbody></table></div>`;
 }
 
 // ---------- الإعدادات ----------

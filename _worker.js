@@ -383,6 +383,10 @@ async function resolveTargetStudent(session, env, studentIdParam) {
     if (String(s.grade) !== String(session.grade) || !classes.includes(s.class_name)) return null;
     return s;
   }
+  if (session.role === 'supervisor') {
+    if (!studentIdParam) return null;
+    return await env.DB.prepare('SELECT * FROM students WHERE id=? AND active=1').bind(studentIdParam).first();
+  }
   return null;
 }
 
@@ -397,7 +401,7 @@ async function resolveTargetWeek(session, env, student, requestedWeek, currentWk
   if (!requestedWeek || Number(requestedWeek) === currentWk) return { week: currentWk, isCatchup: false, error: null };
   const w = Number(requestedWeek);
   if (!Number.isInteger(w) || w < 1 || w >= currentWk) return { week: currentWk, isCatchup: false, error: 'أسبوع غير صالح' };
-  if (session.role === 'teacher') return { week: w, isCatchup: true, error: null }; // المعلم يفتح أي أسبوع فائت مباشرة نيابةً عن الطالب
+  if (session.role === 'teacher' || session.role === 'supervisor') return { week: w, isCatchup: true, error: null }; // المعلمة/المشرفة تفتح أي أسبوع فائت مباشرة نيابةً عن الطالبة
   const granted = await hasCatchupGrant(env, student.id, w);
   if (!granted) return { week: currentWk, isCatchup: false, error: 'هذا الأسبوع غير مسموح لك بعد. اطلب من معلمك منحك صلاحية استكماله.' };
   return { week: w, isCatchup: true, error: null };
@@ -405,7 +409,7 @@ async function resolveTargetWeek(session, env, student, requestedWeek, currentWk
 
 // ---------- اختبار الأسبوع ----------
 async function getWeekTest(session, env, url) {
-  if (session.role !== 'student' && session.role !== 'teacher') return forbidden();
+  if (!['student','teacher','supervisor'].includes(session.role)) return forbidden();
   const student = await resolveTargetStudent(session, env, url.searchParams.get('studentId'));
   if (!student) return badRequest('طالب غير موجود أو خارج نطاقك');
   const settings = await readSettings(env);
@@ -475,7 +479,7 @@ async function getWeekTest(session, env, url) {
 }
 
 async function submitWeekTest(session, env, request) {
-  if (session.role !== 'student' && session.role !== 'teacher') return forbidden();
+  if (!['student','teacher','supervisor'].includes(session.role)) return forbidden();
   let body; try { body = await request.json(); } catch { return badRequest(); }
   const { studentId, answers, reason, week: requestedWeek, subject: requestedSubject } = body || {};
   const student = await resolveTargetStudent(session, env, studentId);
@@ -513,7 +517,7 @@ async function submitWeekTest(session, env, request) {
   const missing = questions.filter(q => { const sel = ansMap[String(q.id)]; return sel === undefined || sel === null || sel === ''; });
   if (missing.length) return badRequest(`لم تُجب عن جميع الأسئلة بعد (متبقٍ ${missing.length} سؤالًا). يجب الإجابة عن كل الأسئلة قبل الإرسال.`);
 
-  const source = session.role === 'teacher' ? 'teacher_student_session' : 'self';
+  const source = session.role !== 'student' ? 'teacher_student_session' : 'self';
   const now = new Date().toISOString();
   let correctCount = 0, total = 0;
   for (const q of questions) {
@@ -522,7 +526,7 @@ async function submitWeekTest(session, env, request) {
     const isCorrect = Number(sel) === Number(q.answer_index) ? 1 : 0;
     if (isCorrect) correctCount++;
     await env.DB.prepare('INSERT INTO attempts(student_id,question_id,week,subject,answer_index,correct,source,teacher_username,reason,entered_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .bind(student.id, q.id, week, q.subject, Number(sel), isCorrect, source, session.role === 'teacher' ? session.ref_id : null, reason || null, now).run();
+      .bind(student.id, q.id, week, q.subject, Number(sel), isCorrect, source, session.role !== 'student' ? session.ref_id : null, reason || null, now).run();
   }
   if (!total) return badRequest('لا توجد أسئلة لهذا الأسبوع' + (settings.subjectsSeparate ? ' لهذه المادة' : ''));
   if (wk.isCatchup) {
