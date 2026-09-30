@@ -370,6 +370,30 @@ async function createQuestion(session, env, request) {
   return json({ ok: true });
 }
 
+// ---------- استيراد أسئلة بالجملة من إكسل (المعلم فقط، لمادته وصفّه المسندين) ----------
+async function importQuestionsExcel(session, env, request) {
+  if (session.role !== 'teacher') return forbidden();
+  let body; try { body = await request.json(); } catch { return badRequest(); }
+  const rows = Array.isArray(body && body.rows) ? body.rows : [];
+  if (!rows.length) return badRequest('لا توجد بيانات للاستيراد');
+  let added = 0; const skipped = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i] || {};
+    const w = Number(row.week);
+    const question = row.question ? String(row.question).trim() : '';
+    const choices = Array.isArray(row.choices) ? row.choices.map(c => String(c ?? '').trim()).filter(Boolean) : [];
+    const ai = Number(row.answerIndex);
+    if (!Number.isInteger(w) || w < 1 || w > 27) { skipped.push({ row: i + 1, reason: 'رقم أسبوع غير صالح' }); continue; }
+    if (!question) { skipped.push({ row: i + 1, reason: 'نص السؤال فارغ' }); continue; }
+    if (choices.length < 2) { skipped.push({ row: i + 1, reason: 'أقل من خيارين صالحين' }); continue; }
+    if (!Number.isInteger(ai) || ai < 0 || ai >= choices.length) { skipped.push({ row: i + 1, reason: 'رقم الإجابة الصحيحة غير صالح' }); continue; }
+    await env.DB.prepare('INSERT INTO questions(grade,subject,week,lesson,question,choices_json,answer_index) VALUES (?,?,?,?,?,?,?)')
+      .bind(session.grade, session.subject, w, row.lesson ? String(row.lesson).trim() : null, question, JSON.stringify(choices), ai).run();
+    added++;
+  }
+  return json({ ok: true, added, skippedCount: skipped.length, skipped: skipped.slice(0, 30) });
+}
+
 // ---------- تحديد الطالب المستهدف (نفسه إن كان طالبًا، أو ضمن نطاق المعلم عبر وضع "فتح باسم الطالب") ----------
 async function resolveTargetStudent(session, env, studentIdParam) {
   if (session.role === 'student') {
@@ -791,6 +815,7 @@ async function handleApi(request, env, path) {
     if (method === 'GET' && path === 'curriculum') return await getCurriculum(env);
     if (method === 'GET' && path === 'questions-bank') return await listQuestionsBank(session, env);
     if (method === 'POST' && path === 'questions') return await createQuestion(session, env, request);
+    if (method === 'POST' && path === 'questions/import-excel') return await importQuestionsExcel(session, env, request);
 
     if (method === 'GET' && path === 'week-test') return await getWeekTest(session, env, url);
     if (method === 'POST' && path === 'week-test/submit') return await submitWeekTest(session, env, request);
