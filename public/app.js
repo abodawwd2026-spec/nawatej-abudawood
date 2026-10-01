@@ -332,15 +332,10 @@ async function grantCatchupAllStudents() {
 function startProxyWeek(id, week) { if (role !== 'teacher') return; proxyStudentId = id; proxyTargetWeek = week; selectedSubject = null; page = 'proxy'; render(); }
 
 // ---------- المعلمون ----------
-function classBadges(classesStr) {
-  const classes = String(classesStr || '').split(/[,،]+/).map(x => x.trim()).filter(Boolean);
-  if (!classes.length) return '<span class="muted">—</span>';
-  return classes.map(c => `<span class="pill" style="background:var(--brand-bg,#eef6f5);color:var(--brand,#0b5d67);margin-inline-end:4px;display:inline-block">${esc(c)}</span>`).join('');
-}
 async function teachers() {
   const data = await api('teachers');
   window.__teachersCache = data.teachers;
-  return `<div class="page-head"><h2>المعلمون</h2><button class="primary" onclick="addTeacher()">+ إضافة معلم</button></div><div class="panel"><p class="muted">يمكن للمشرف تحديد المادة والصف والفصول وكلمة المرور. هذه بيانات دخول المعلم للمنصة.</p><table><thead><tr><th>المعلم</th><th>اسم المستخدم</th><th>المادة</th><th>الصف</th><th>الفصول المسندة</th><th>إجراء</th></tr></thead><tbody>${data.teachers.map(t => `<tr><td>${esc(t.name)}</td><td>${esc(t.username)}</td><td>${esc(t.subject)}</td><td>${t.grade}</td><td>${classBadges(t.classes)}</td><td><div class="actions" style="margin:0"><button onclick="editTeacher('${esc(t.username)}')">تعديل / تغيير كلمة المرور</button><button class="danger" onclick="delTeacher('${esc(t.username)}')">حذف</button></div></td></tr>`).join('') || '<tr><td colspan="6">لا يوجد معلمون.</td></tr>'}</tbody></table></div>`;
+  return `<div class="page-head"><h2>المعلمون</h2><button class="primary" onclick="addTeacher()">+ إضافة معلم</button></div><div class="panel"><p class="muted">يمكن للمشرف تحديد المادة والصف والفصول وكلمة المرور. هذه بيانات دخول المعلم للمنصة.</p><table><thead><tr><th>المعلم</th><th>اسم المستخدم</th><th>المادة</th><th>الصف</th><th>الفصول</th><th>إجراء</th></tr></thead><tbody>${data.teachers.map(t => `<tr><td>${esc(t.name)}</td><td>${esc(t.username)}</td><td>${esc(t.subject)}</td><td>${t.grade}</td><td>${esc(t.classes)}</td><td><div class="actions" style="margin:0"><button onclick="editTeacher('${esc(t.username)}')">تعديل / تغيير كلمة المرور</button><button class="danger" onclick="delTeacher('${esc(t.username)}')">حذف</button></div></td></tr>`).join('') || '<tr><td colspan="6">لا يوجد معلمون.</td></tr>'}</tbody></table></div>`;
 }
 async function addTeacher() {
   const name = prompt('اسم المعلم'); if (!name) return;
@@ -382,8 +377,7 @@ async function questionsPage() {
   const data = await api('questions-bank');
   const list = data.questions;
   const addForm = role === 'teacher' ? `<div class="panel">
-    <h3>${showAddQuestionForm ? '➖ إغلاق النموذج' : '+ إضافة سؤال جديد'} <button class="small-btn" onclick="showAddQuestionForm=!showAddQuestionForm;render()">${showAddQuestionForm ? 'إغلاق' : 'إضافة سؤال'}</button> <button class="small-btn" onclick="importQuestionsFlow()">📥 استيراد أسئلة من إكسل</button></h3>
-    <p class="muted" style="margin-top:6px">ترتيب أعمدة ملف الإكسل: <b>الأسبوع، الدرس، السؤال، الخيار1، الخيار2، الخيار3، الخيار4، رقم الإجابة الصحيحة (1 إلى 4)</b></p>
+    <h3>${showAddQuestionForm ? '➖ إغلاق النموذج' : '+ إضافة سؤال جديد'} <button class="small-btn" onclick="showAddQuestionForm=!showAddQuestionForm;render()">${showAddQuestionForm ? 'إغلاق' : 'إضافة سؤال'}</button></h3>
     ${showAddQuestionForm ? `
     <label>الأسبوع (1 إلى 27)</label><input type="number" id="newQWeek" min="1" max="27" placeholder="مثال: 5">
     <label>الدرس / المهارة (اختياري)</label><input id="newQLesson" placeholder="مثال: الأنماط والدوال">
@@ -412,41 +406,6 @@ async function submitNewQuestion() {
     alert('تمت إضافة السؤال إلى بنك الأسئلة بنجاح.');
     showAddQuestionForm = false; render();
   } catch (e) { alert(e.message); }
-}
-// ---------- استيراد أسئلة بالجملة من إكسل (المعلم) ----------
-function importQuestionsFlow() {
-  const input = document.createElement('input');
-  input.type = 'file'; input.accept = '.xlsx,.xls,.csv';
-  input.onchange = async () => {
-    const file = input.files[0]; if (!file) return;
-    try {
-      const buf = await file.arrayBuffer();
-      const wb = XLSX.read(buf, { type: 'array' });
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-      if (!rows.length) return alert('الملف فارغ.');
-      let startRow = 0;
-      const header = (rows[0] || []).map(x => String(x || ''));
-      const looksLikeHeader = header.some(h => /أسبوع|week|سؤال|question/i.test(h));
-      if (looksLikeHeader) startRow = 1;
-      const parsed = [];
-      for (let i = startRow; i < rows.length; i++) {
-        const row = rows[i]; if (!row || !row.length) continue;
-        const week = Number(row[0]);
-        const lesson = String(row[1] ?? '').trim();
-        const question = String(row[2] ?? '').trim();
-        const choices = [row[3], row[4], row[5], row[6]].map(c => String(c ?? '').trim()).filter(Boolean);
-        const answerNum = Number(row[7]); // 1 إلى 4 في الملف
-        const answerIndex = Number.isInteger(answerNum) ? answerNum - 1 : NaN;
-        if (question) parsed.push({ week, lesson, question, choices, answerIndex });
-      }
-      if (!parsed.length) return alert('لم يتم العثور على بيانات صالحة. تأكدي من ترتيب الأعمدة: الأسبوع، الدرس، السؤال، الخيار1، الخيار2، الخيار3، الخيار4، رقم الإجابة الصحيحة.');
-      const res = await api('questions/import-excel', { method: 'POST', body: { rows: parsed } });
-      alert(`تم استيراد ${res.added} سؤالًا بنجاح.${res.skippedCount ? `\nتم تجاهل ${res.skippedCount} صفًا لخلل في البيانات:\n` + res.skipped.map(s => `الصف ${s.row}: ${s.reason}`).join('\n') : ''}`);
-      showAddQuestionForm = false; render();
-    } catch (e) { alert('تعذرت قراءة الملف: ' + e.message); }
-  };
-  input.click();
 }
 
 // ---------- اختبار الطالب (نفسه) ----------
@@ -672,8 +631,7 @@ async function reports() {
   const weekChart = stats && stats.weeks && stats.weeks.length ? `<div class="panel"><h3>نسبة الإتقان عبر الأسابيع${role === 'teacher' ? ' (فصولك)' : ''}</h3>${changeBadge(stats.change)}<div style="margin-top:14px">${barChart(stats.weeks.map(w => ({ label: 'أسبوع ' + w.week, value: w.pct })))}</div></div>` : '';
   const subjectChart = stats && stats.bySubject && stats.bySubject.length ? `<div class="panel"><h3>مقارنة الأداء بين المواد</h3><div style="margin-top:14px">${barChart(stats.bySubject.map(s => ({ label: s.subject, value: s.pct })))}</div></div>` : '';
   const insights = stats ? generateInsights(stats, list) : [];
-  const teacherContext = role === 'teacher' ? `<div class="panel" style="background:#eef6f5;border-color:var(--brand,#0b5d67)"><h3>📋 نطاقك التدريسي</h3><p style="margin-top:8px">الصف: <b>${user.grade}</b> &nbsp;|&nbsp; الفصول المسندة: ${classBadges(user.classes)} &nbsp;|&nbsp; المادة: <b>${esc(user.subject)}</b></p></div>` : '';
-  const insightsPanel = `<div class="panel" style="background:linear-gradient(135deg,#f4f1ff,#eef6ff);border-color:#c9b8f0"><h3>🧠 قياس الأثر — تحليل تلقائي</h3>${role === 'teacher' ? `<p class="muted" style="margin:6px 0 0">التحليل التالي خاص بالصف ${user.grade} — الفصول ${esc(user.classes)} — مادة ${esc(user.subject)}</p>` : ''}<ul style="margin:10px 0 0;padding-inline-start:22px;line-height:2.1">${insights.map(l => `<li>${l}</li>`).join('')}</ul></div>`;
+  const insightsPanel = `<div class="panel" style="background:linear-gradient(135deg,#f4f1ff,#eef6ff);border-color:#c9b8f0"><h3>🧠 قياس الأثر — تحليل تلقائي</h3><ul style="margin:10px 0 0;padding-inline-start:22px;line-height:2.1">${insights.map(l => `<li>${l}</li>`).join('')}</ul></div>`;
 
   const groups = {
     ok: { title: 'الطلاب المتقنون', icon: '🟢', students: list.filter(s => s.status === 'ok'), showActions: false },
@@ -694,7 +652,6 @@ async function reports() {
   </select></div>`;
 
   return `<div class="page-head"><div><h2>التقارير</h2><p class="muted">${role === 'teacher' ? 'تقارير طلاب فصولك المسندة فقط. ' : ''}يظهر هنا أيضًا إذا كانت الإجابة من الطالب أو نيابةً عنه بواسطة المعلم أو المشرف.</p></div><button onclick="window.print()">طباعة / PDF</button></div>
-  ${teacherContext}
   ${insightsPanel}
   ${weekChart}
   ${subjectChart}
